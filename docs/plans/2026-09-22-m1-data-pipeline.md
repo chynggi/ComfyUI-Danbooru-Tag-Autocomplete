@@ -1915,6 +1915,25 @@ def test_resolve_aliases_drops_missing_targets():
     assert dropped["missing"] == 1
 
 
+def test_resolve_aliases_follows_chains_through_non_tag_names():
+    tags = {"c": record("c")}
+    resolved, dropped = resolve_aliases({"a": "b", "b": "c"}, tags)
+    assert resolved == {"a": "c", "b": "c"}
+    assert dropped["missing"] == 0
+
+
+def test_resolve_aliases_detects_cycles_that_never_reach_a_tag():
+    resolved, dropped = resolve_aliases({"a": "b", "b": "a"}, {})
+    assert resolved == {}
+    assert dropped["cycle"] == 2
+
+
+def test_resolve_aliases_drops_a_self_mapping():
+    resolved, dropped = resolve_aliases({"a": "a"}, {"a": record("a")})
+    assert resolved == {}
+    assert dropped["self"] == 1
+
+
 def test_resolve_aliases_drops_deprecated_targets():
     tags = {"a": record("a"), "old": record("old", deprecated=True)}
     resolved, dropped = resolve_aliases({"a": "old"}, tags)
@@ -2082,14 +2101,15 @@ def resolve_aliases(
                 dead = True
                 break
             seen.add(current)
+            following = aliases.get(current)
+            if following is not None and following != current:
+                current = following
+                continue
             if current not in tags:
                 dropped["missing"] += 1
                 dead = True
                 break
-            following = aliases.get(current)
-            if following is None or following == current:
-                break
-            current = following
+            break
         else:
             dropped["cycle"] += 1
             dead = True
@@ -2238,7 +2258,7 @@ if __name__ == "__main__":
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_build.py -v`
-Expected: PASS (16 passed)
+Expected: PASS (19 passed)
 
 - [ ] **Step 7: Commit**
 
