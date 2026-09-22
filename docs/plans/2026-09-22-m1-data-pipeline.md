@@ -1302,7 +1302,7 @@ def write_hlibr_fixture(directory: Path) -> FetchResult:
     return FetchResult(
         HlibrSource.id,
         "revision-sha",
-        "2026-04-08",
+        HlibrSource.data_date(directory / "metadata.json"),
         {
             "tags.parquet": directory / "tags.parquet",
             "tag_aliases.parquet": directory / "tag_aliases.parquet",
