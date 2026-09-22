@@ -93,6 +93,25 @@ def test_resolve_aliases_drops_missing_targets():
     assert dropped["missing"] == 1
 
 
+def test_resolve_aliases_follows_chains_through_non_tag_names():
+    tags = {"c": record("c")}
+    resolved, dropped = resolve_aliases({"a": "b", "b": "c"}, tags)
+    assert resolved == {"a": "c", "b": "c"}
+    assert dropped["missing"] == 0
+
+
+def test_resolve_aliases_detects_cycles_that_never_reach_a_tag():
+    resolved, dropped = resolve_aliases({"a": "b", "b": "a"}, {})
+    assert resolved == {}
+    assert dropped["cycle"] == 2
+
+
+def test_resolve_aliases_drops_a_self_mapping():
+    resolved, dropped = resolve_aliases({"a": "a"}, {"a": record("a")})
+    assert resolved == {}
+    assert dropped["self"] == 1
+
+
 def test_resolve_aliases_drops_deprecated_targets():
     tags = {"a": record("a"), "old": record("old", deprecated=True)}
     resolved, dropped = resolve_aliases({"a": "old"}, tags)

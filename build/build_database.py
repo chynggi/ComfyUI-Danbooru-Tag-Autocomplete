@@ -88,14 +88,15 @@ def resolve_aliases(
                 dead = True
                 break
             seen.add(current)
+            following = aliases.get(current)
+            if following is not None and following != current:
+                current = following
+                continue
             if current not in tags:
                 dropped["missing"] += 1
                 dead = True
                 break
-            following = aliases.get(current)
-            if following is None or following == current:
-                break
-            current = following
+            break
         else:
             dropped["cycle"] += 1
             dead = True
