@@ -2671,7 +2671,7 @@ import time
 
 import pytest
 
-from artifact import Artifact, TagEntry, TagIndex, TagSet, encode
+from artifact import TagEntry, TagIndex, TagSet, decode, encode
 
 SYNTHETIC_TAGS = 1_710_000
 SYNTHETIC_ALIASES = 60_000
