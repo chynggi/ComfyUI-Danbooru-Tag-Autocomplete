@@ -12,7 +12,7 @@ from pathlib import Path
 
 from artifact import normalize_tag
 
-from .base import FetchResult, SourceData, TagRecord, download, hf_dataset_revision, hf_resolve_url
+from .base import FetchResult, SourceData, TagRecord, download, hf_dataset_revision, hf_lfs_oids, hf_resolve_url, sha256_of
 
 TAG_COLUMNS = ("name", "category", "post_count", "is_deprecated")
 ALIAS_COLUMNS = ("antecedent_name", "consequent_name", "status")
@@ -24,11 +24,18 @@ class HlibrSource:
     def fetch(self, cache_dir: Path) -> FetchResult:
         revision = hf_dataset_revision(self.id)
         target = cache_dir / self.id.replace("/", "__") / revision
+        oids = hf_lfs_oids(self.id, revision)
         files = {
-            name: download(hf_resolve_url(self.id, revision, name), target / name)
+            name: download(hf_resolve_url(self.id, revision, name), target / name, expected_sha256=oids.get(name))
             for name in ("tags.parquet", "tag_aliases.parquet", "metadata.json")
         }
-        return FetchResult(self.id, revision, self.data_date(files["metadata.json"]), files)
+        return FetchResult(
+            self.id,
+            revision,
+            self.data_date(files["metadata.json"]),
+            files,
+            hashes={name: sha256_of(path) for name, path in files.items()},
+        )
 
     @staticmethod
     def data_date(metadata_path: Path) -> str:

@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from artifact import TagEntry, TagSet, encode  # noqa: E402
 from fetch_upstream import SOURCE_ORDER, SOURCES, fetch_all  # noqa: E402
 from sources.base import SourceData, TagRecord  # noqa: E402
+from validate_database import validate  # noqa: E402
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,6 +232,15 @@ def main(argv: list[str] | None = None) -> int:
     metadata = write_artifacts(
         tagset, Path(args.out), data_version=data_version, profile_name=profile.name, sources_meta=sources_meta
     )
+    artifact_path = Path(args.out) / "tags.bin.gz"
+    metadata_path = Path(args.out) / "metadata.json"
+    errors = validate(artifact_path, metadata_path)
+    if errors:
+        artifact_path.unlink(missing_ok=True)
+        metadata_path.unlink(missing_ok=True)
+        for error in errors:
+            print(f"error: {error}")
+        return 1
     print(json.dumps(stats, indent=2))
     print(f"data_version={metadata['data_version']} sha256={metadata['artifact']['sha256']}")
     return 0

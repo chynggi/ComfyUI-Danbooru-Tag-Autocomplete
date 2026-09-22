@@ -1,6 +1,7 @@
 import gzip
 import hashlib
 import json
+import struct
 
 from artifact import TagEntry, TagSet, VALID_CATEGORIES, encode
 from build.validate_database import read_artifact, validate, validate_custom
@@ -170,3 +171,35 @@ def test_validate_custom_reports_a_non_object_json_entry(tmp_path):
 
 def test_valid_categories_matches_danbooru():
     assert VALID_CATEGORIES == frozenset({0, 1, 3, 4, 5})
+
+
+def test_invalid_utf8_name_is_reported_not_raised(tmp_path):
+    blob = bytearray(encode(TagSet(
+        threshold=25,
+        tags=(TagEntry("a", 0, 10, False),),
+        aliases=(),
+        alias_target=(),
+    )))
+    off_names = struct.unpack_from("<I", blob, 20)[0]
+    blob[off_names:off_names + 1] = b"\xff"
+    path = tmp_path / "tags.bin.gz"
+    with open(path, "wb") as handle:
+        with gzip.GzipFile(fileobj=handle, mode="wb", mtime=0) as stream:
+            stream.write(blob)
+    assert any("not valid UTF-8" in error for error in validate(path))
+
+
+def test_invalid_utf8_alias_is_reported_not_raised(tmp_path):
+    blob = bytearray(encode(TagSet(
+        threshold=25,
+        tags=(TagEntry("a", 0, 10, False),),
+        aliases=("b",),
+        alias_target=(0,),
+    )))
+    off_alias_names = struct.unpack_from("<I", blob, 40)[0]
+    blob[off_alias_names:off_alias_names + 1] = b"\xff"
+    path = tmp_path / "tags.bin.gz"
+    with open(path, "wb") as handle:
+        with gzip.GzipFile(fileobj=handle, mode="wb", mtime=0) as stream:
+            stream.write(blob)
+    assert any("not valid UTF-8" in error for error in validate(path))

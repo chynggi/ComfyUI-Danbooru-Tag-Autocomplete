@@ -13,7 +13,7 @@ from pathlib import Path
 
 from artifact import normalize_tag
 
-from .base import FetchResult, SourceData, TagRecord, download, hf_dataset_revision, hf_dataset_tree, hf_resolve_url
+from .base import FetchResult, SourceData, TagRecord, download, hf_dataset_revision, hf_dataset_tree, hf_lfs_oids, hf_resolve_url, sha256_of
 
 
 class HDiffusionSource:
@@ -34,8 +34,14 @@ class HDiffusionSource:
         revision = hf_dataset_revision(self.id)
         data_date, path = self.latest_entry(hf_dataset_tree(self.id, revision))
         destination = cache_dir / self.id.replace("/", "__") / revision / path
-        download(hf_resolve_url(self.id, revision, path), destination)
-        return FetchResult(self.id, revision, data_date, {"csv": destination})
+        download(hf_resolve_url(self.id, revision, path), destination, expected_sha256=hf_lfs_oids(self.id, revision).get(path))
+        return FetchResult(
+            self.id,
+            revision,
+            data_date,
+            {"csv": destination},
+            hashes={path: sha256_of(destination)},
+        )
 
     def read(self, fetched: FetchResult) -> SourceData:
         tags = {}

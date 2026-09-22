@@ -1,9 +1,13 @@
+import functools
+import hashlib
+import http.server
 import json
+import threading
 from pathlib import Path
 
 import pytest
 
-from build.sources.base import FetchResult
+from build.sources.base import FetchResult, download
 from build.sources.hlibr import HlibrSource
 
 
@@ -127,3 +131,45 @@ def test_hdiffusion_rejects_an_extra_column(tmp_path):
 def test_hdiffusion_rejects_numeric_columns_that_are_not_numbers(tmp_path):
     with pytest.raises(ValueError):
         HDiffusionSource().read(write_hdiffusion_fixture(tmp_path, "tag,category,count\n"))
+
+
+@pytest.fixture
+def http_files(tmp_path):
+    root = tmp_path / "served"
+    root.mkdir()
+
+    class QuietHandler(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(QuietHandler, directory=str(root)))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield root, f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_download_accepts_a_matching_sha256(http_files):
+    root, base_url = http_files
+    payload = b"payload"
+    (root / "data.bin").write_bytes(payload)
+    destination = root / "cache" / "data.bin"
+
+    download(f"{base_url}/data.bin", destination, expected_sha256=hashlib.sha256(payload).hexdigest())
+
+    assert destination.read_bytes() == payload
+
+
+def test_download_rejects_a_sha256_mismatch(http_files):
+    root, base_url = http_files
+    (root / "data.bin").write_bytes(b"payload")
+    destination = root / "cache" / "data.bin"
+
+    with pytest.raises(ValueError, match="sha256 mismatch"):
+        download(f"{base_url}/data.bin", destination, expected_sha256="0" * 64)
+
+    assert not destination.exists()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -26,6 +26,7 @@ class FetchResult:
     revision: str
     data_date: str
     files: dict[str, Path]
+    hashes: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,15 @@ def hf_dataset_tree(repo_id: str, revision: str) -> list[dict]:
     return response.json()
 
 
+def hf_lfs_oids(repo_id: str, revision: str) -> dict[str, str]:
+    """Map each LFS file path to the sha256 the Hub published for it."""
+    return {
+        entry["path"]: entry["lfs"]["oid"]
+        for entry in hf_dataset_tree(repo_id, revision)
+        if isinstance(entry.get("lfs"), dict) and entry["lfs"].get("oid")
+    }
+
+
 def hf_resolve_url(repo_id: str, revision: str, path: str) -> str:
     return f"https://huggingface.co/datasets/{repo_id}/resolve/{revision}/{path}"
 
@@ -86,4 +96,9 @@ def download(url: str, destination: Path, expected_sha256: str | None = None) ->
             for chunk in response.iter_content(chunk_size=1 << 20):
                 handle.write(chunk)
     os.replace(temporary, destination)
+    digest = sha256_of(destination)
+    if expected_sha256 is not None and digest != expected_sha256:
+        temporary.unlink(missing_ok=True)
+        destination.unlink(missing_ok=True)
+        raise ValueError(f"{url}: sha256 mismatch (expected {expected_sha256}, got {digest})")
     return destination

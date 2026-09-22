@@ -44,10 +44,17 @@ def validate(
         return [f"artifact decode failed: {exc}"]
 
     deprecated_count = 0
+    tag_names: set[str] = set()
     for index in range(artifact.n_tags):
-        name = artifact.name(index)
-        if not name.strip():
-            errors.append(f"tag {index}: empty name")
+        try:
+            name = artifact.name(index)
+        except UnicodeDecodeError:
+            errors.append(f"tag {index}: name is not valid UTF-8")
+            name = "<invalid utf-8>"
+        else:
+            tag_names.add(name)
+            if not name.strip():
+                errors.append(f"tag {index}: empty name")
         if artifact.category(index) not in VALID_CATEGORIES:
             errors.append(f"tag {index} ({name}): invalid category {artifact.category(index)}")
         if artifact.post_count(index) > post_count_limit:
@@ -55,9 +62,12 @@ def validate(
         if artifact.deprecated(index):
             deprecated_count += 1
 
-    tag_names = {artifact.name(index) for index in range(artifact.n_tags)}
     for index in range(artifact.n_aliases):
-        alias = artifact.alias(index)
+        try:
+            alias = artifact.alias(index)
+        except UnicodeDecodeError:
+            errors.append(f"alias {index}: name is not valid UTF-8")
+            continue
         if alias in tag_names:
             errors.append(f"alias {index} ({alias}): alias name is also a tag name")
         if artifact.deprecated(artifact.alias_target(index)):

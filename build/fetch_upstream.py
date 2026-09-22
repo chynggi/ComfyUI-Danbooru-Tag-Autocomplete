@@ -46,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
             "revision": result.revision,
             "data_date": result.data_date,
             "files": {key: str(value) for key, value in result.files.items()},
+            "hashes": result.hashes,
         }
         for result in results
     }

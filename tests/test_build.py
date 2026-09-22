@@ -7,6 +7,8 @@ from artifact import decode, encode, normalize_tag
 from build.build_database import Profile, assemble, load_profile, merge_sources, resolve_aliases, write_artifacts
 from build.sources.base import SourceData, TagRecord
 
+FIXTURE_PROFILE = "profiles/danbooru.yaml"
+
 
 def record(name, category=0, post_count=100, deprecated=False, aliases=()):
     return TagRecord(normalize_tag(name), category, post_count, deprecated, aliases)
@@ -179,3 +181,23 @@ def test_write_artifacts_metadata_sha_matches_file(tmp_path):
     digest = hashlib.sha256((tmp_path / "tags.bin.gz").read_bytes()).hexdigest()
     assert metadata["artifact"]["sha256"] == digest
     assert json.loads((tmp_path / "metadata.json").read_text(encoding="utf-8")) == metadata
+
+
+def test_main_removes_outputs_when_validation_fails(tmp_path, monkeypatch):
+    from build import build_database
+
+    class StubSource:
+        def read(self, fetched):
+            return hlibr_data()
+
+    monkeypatch.setattr(build_database, "fetch_all", lambda names, cache: [object()])
+    monkeypatch.setattr(build_database, "SOURCE_ORDER", ("hlibr",))
+    monkeypatch.setattr(build_database, "SOURCES", {"hlibr": StubSource})
+    monkeypatch.setattr(build_database, "validate", lambda artifact, metadata: ["synthetic failure"])
+
+    out = tmp_path / "generated"
+    code = build_database.main(["--profile", str(FIXTURE_PROFILE), "--out", str(out)])
+
+    assert code == 1
+    assert not (out / "tags.bin.gz").exists()
+    assert not (out / "metadata.json").exists()
