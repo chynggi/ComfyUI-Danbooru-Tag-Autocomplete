@@ -2622,7 +2622,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_validate.py -v`
-Expected: PASS (21 passed)
+Expected: PASS (22 passed)
 
 - [ ] **Step 5: Run the whole suite and commit**
 
