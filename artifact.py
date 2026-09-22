@@ -277,6 +277,23 @@ class Artifact:
     def entry(self, index: int) -> TagEntry:
         return TagEntry(self.name(index), self.category(index), self.post_count(index), self.deprecated(index))
 
+    @staticmethod
+    def _lower_bound(blob, offsets, count: int, key: bytes) -> int:
+        low, high = 0, count
+        while low < high:
+            mid = (low + high) // 2
+            if bytes(blob[offsets[mid]:offsets[mid + 1]]) < key:
+                low = mid + 1
+            else:
+                high = mid
+        return low
+
+    def lower_bound_name(self, key: bytes) -> int:
+        return self._lower_bound(self._names, self._name_offsets, self.n_tags, key)
+
+    def lower_bound_alias(self, key: bytes) -> int:
+        return self._lower_bound(self._alias_names, self._alias_offsets, self.n_aliases, key)
+
     def to_tagset(self) -> TagSet:
         return TagSet(
             threshold=self.threshold,
@@ -292,3 +309,107 @@ class Artifact:
 
 def decode(data: bytes) -> Artifact:
     return Artifact(data)
+
+
+RANK_EXACT = 0
+RANK_NAME_PREFIX = 1
+RANK_ALIAS_PREFIX = 2
+
+_TOKEN_SEPARATORS = ",\n;"
+
+
+def extract_token(text: str, caret: int) -> str:
+    """Return the normalized tag token under the caret, or "" when there is none."""
+    caret = max(0, min(caret, len(text)))
+    head = text[:caret]
+    start = 0
+    for index in range(len(head) - 1, -1, -1):
+        if head[index] in _TOKEN_SEPARATORS:
+            start = index + 1
+            break
+    return normalize_tag(head[start:])
+
+
+@dataclass(frozen=True, slots=True)
+class SearchHit:
+    name: str
+    category: int
+    post_count: int
+    deprecated: bool
+    alias: str | None
+    rank: int
+
+
+def _hit_sort_key(hit: SearchHit) -> tuple[int, int, int, str]:
+    name_length = len(hit.name.encode("utf-8")) if hit.rank == RANK_NAME_PREFIX else 0
+    return (hit.rank, name_length, -hit.post_count, hit.name)
+
+
+class TagIndex:
+    """Search over a main artifact with an optional custom overlay.
+
+    Custom entries win over main entries with the same canonical name.
+    """
+
+    __slots__ = ("_main", "_custom")
+
+    def __init__(self, main: Artifact, custom: Artifact | None = None) -> None:
+        self._main = main
+        self._custom = custom
+
+    def _collect(self, source: Artifact, key_bytes: bytes) -> list[SearchHit]:
+        hits: list[SearchHit] = []
+        for index in range(source.lower_bound_name(key_bytes), source.n_tags):
+            name_bytes = source.name_bytes(index)
+            if not name_bytes.startswith(key_bytes):
+                break
+            rank = RANK_EXACT if name_bytes == key_bytes else RANK_NAME_PREFIX
+            hits.append(SearchHit(
+                source.name(index), source.category(index), source.post_count(index),
+                source.deprecated(index), None, rank,
+            ))
+        for index in range(source.lower_bound_alias(key_bytes), source.n_aliases):
+            alias_bytes = source.alias_bytes(index)
+            if not alias_bytes.startswith(key_bytes):
+                break
+            target = source.alias_target(index)
+            hits.append(SearchHit(
+                source.name(target), source.category(target), source.post_count(target),
+                source.deprecated(target), source.alias(index), RANK_ALIAS_PREFIX,
+            ))
+        return hits
+
+    def _search_source(
+        self,
+        source: Artifact,
+        key_bytes: bytes,
+        categories: frozenset[int] | None,
+        exclude_deprecated: bool,
+    ) -> dict[str, SearchHit]:
+        best: dict[str, SearchHit] = {}
+        for hit in self._collect(source, key_bytes):
+            if exclude_deprecated and hit.deprecated:
+                continue
+            if categories is not None and hit.category not in categories:
+                continue
+            current = best.get(hit.name)
+            if current is None or _hit_sort_key(hit) < _hit_sort_key(current):
+                best[hit.name] = hit
+        return best
+
+    def search(
+        self,
+        query: str,
+        limit: int = 32,
+        categories: frozenset[int] | None = None,
+        exclude_deprecated: bool = True,
+    ) -> list[SearchHit]:
+        """Search the main artifact, then let custom entries replace main entries by name."""
+        key = normalize_tag(query)
+        if not key:
+            return []
+        key_bytes = key.encode("utf-8")
+        merged = self._search_source(self._main, key_bytes, categories, exclude_deprecated)
+        if self._custom is not None:
+            merged.update(self._search_source(self._custom, key_bytes, categories, exclude_deprecated))
+        return sorted(merged.values(), key=_hit_sort_key)[:limit]

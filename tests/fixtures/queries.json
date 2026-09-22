@@ -1,0 +1,90 @@
+{
+  "threshold": 25,
+  "queries": {
+    "blue_h": [
+      {
+        "name": "blue_hair",
+        "category": 0,
+        "postCount": 1200,
+        "deprecated": false,
+        "alias": null,
+        "rank": 1
+      },
+      {
+        "name": "blue_hairband",
+        "category": 0,
+        "postCount": 82,
+        "deprecated": false,
+        "alias": null,
+        "rank": 1
+      },
+      {
+        "name": "blue_hair_ornament",
+        "category": 0,
+        "postCount": 30,
+        "deprecated": false,
+        "alias": null,
+        "rank": 1
+      }
+    ],
+    "blue_hair": [
+      {
+        "name": "blue_hair",
+        "category": 0,
+        "postCount": 1200,
+        "deprecated": false,
+        "alias": null,
+        "rank": 0
+      },
+      {
+        "name": "blue_hairband",
+        "category": 0,
+        "postCount": 82,
+        "deprecated": false,
+        "alias": null,
+        "rank": 1
+      },
+      {
+        "name": "blue_hair_ornament",
+        "category": 0,
+        "postCount": 30,
+        "deprecated": false,
+        "alias": null,
+        "rank": 1
+      }
+    ],
+    "blu_h": [
+      {
+        "name": "blue_hair",
+        "category": 0,
+        "postCount": 1200,
+        "deprecated": false,
+        "alias": "blu_hair",
+        "rank": 2
+      }
+    ],
+    "miku": [
+      {
+        "name": "hatsune_miku",
+        "category": 4,
+        "postCount": 900,
+        "deprecated": false,
+        "alias": "miku",
+        "rank": 2
+      }
+    ],
+    "old_tag": [],
+    "high": [
+      {
+        "name": "highres",
+        "category": 5,
+        "postCount": 700,
+        "deprecated": false,
+        "alias": null,
+        "rank": 1
+      }
+    ],
+    "zzz": [],
+    "": []
+  }
+}
