@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Project license: MIT.
-- Node runtime dependencies: **0**. `requests` ships with ComfyUI. `pyarrow` and `pyyaml` are build/CI/test-only.
+- Node runtime dependencies: **0** additional. `requests` ships with ComfyUI at runtime; `pyarrow`, `pyyaml` and `requests` are build/CI/test-only in this project's own venv.
 - Python: 3.13 via `uv`. Frontend tests (later milestone) use Node 22.
 - Artifact format version **1**, little-endian, header 64 bytes, every section start 4-byte aligned.
 - Stored tag names and aliases are always lowercase. Case-insensitivity comes from lowercasing queries, never from the stored data.
@@ -73,7 +73,7 @@
 ```bash
 cd custom_nodes/ComfyUI-Danbooru-Tag-Autocomplete
 uv venv --python 3.13 .venv
-uv pip install --python .venv/bin/python pytest pyarrow pyyaml
+uv pip install --python .venv/bin/python pytest pyarrow pyyaml requests
 mkdir -p build/sources profiles tests/fixtures docs/plans
 ```
 
@@ -2692,7 +2692,7 @@ Plan (M1): `docs/plans/2026-09-22-m1-data-pipeline.md`
 
 ```bash
 uv venv --python 3.13 .venv
-uv pip install --python .venv/bin/python pytest pyarrow pyyaml
+uv pip install --python .venv/bin/python pytest pyarrow pyyaml requests
 .venv/bin/python build/fetch_upstream.py --cache data/raw
 .venv/bin/python build/build_database.py --profile profiles/danbooru.yaml --out generated
 .venv/bin/python build/validate_database.py --artifact generated/tags.bin.gz --metadata generated/metadata.json
