@@ -2283,12 +2283,17 @@ git commit -m "Add build pipeline"
   - `validate_database.validate_custom(path: Path) -> list[str]`
   - `validate_database.main(argv: list[str] | None = None) -> int`
 
+**Contract:** `validate` returns a list of error strings and **never raises** for a bad artifact or a bad metadata file. `validate_custom` returns warning strings and **never raises** for a bad custom file. Only built-artifact problems fail the run; custom-file problems are warnings.
+
+Structural checks (magic, format version, section alignment and bounds, offset monotonicity, name/alias sort order, `alias_target` range) belong to `artifact.decode` and are **not** re-implemented here; a decode failure becomes one error string.
+
 - [ ] **Step 1: Write the failing validation tests**
 
 `tests/test_validate.py`:
 
 ```python
 import gzip
+import hashlib
 import json
 
 from artifact import TagEntry, TagSet, VALID_CATEGORIES, encode
@@ -2334,8 +2339,7 @@ def test_gzip_and_plain_buffers_are_both_accepted(tmp_path):
 
 def test_invalid_category_is_reported(tmp_path):
     path = write_artifact(tmp_path, [TagEntry("a", 2, 10, False)])
-    errors = validate(path)
-    assert any("invalid category" in error for error in errors)
+    assert any("invalid category" in error for error in validate(path))
 
 
 def test_empty_name_is_reported(tmp_path):
@@ -2359,10 +2363,57 @@ def test_alias_pointing_at_deprecated_target_is_reported(tmp_path):
     assert any("target is deprecated" in error for error in validate(path))
 
 
+def test_truncated_gzip_is_reported_not_raised(tmp_path):
+    path = write_artifact(tmp_path, [TagEntry("a", 0, 10, False)])
+    path.write_bytes(path.read_bytes()[:-8])
+    errors = validate(path)
+    assert errors and "could not be read" in errors[0]
+
+
+def test_corrupt_gzip_body_is_reported_not_raised(tmp_path):
+    path = write_artifact(tmp_path, [TagEntry("a", 0, 10, False)])
+    data = bytearray(path.read_bytes())
+    data[len(data) // 2] ^= 0xFF
+    path.write_bytes(bytes(data))
+    assert validate(path)
+
+
+def test_malformed_metadata_is_reported_not_raised(tmp_path):
+    path = write_artifact(tmp_path, [TagEntry("a", 0, 10, False)])
+    metadata = tmp_path / "metadata.json"
+    metadata.write_text("{not json", encoding="utf-8")
+    assert any("metadata could not be read" in error for error in validate(path, metadata))
+
+
+def test_metadata_that_is_not_an_object_is_reported(tmp_path):
+    path = write_artifact(tmp_path, [TagEntry("a", 0, 10, False)])
+    metadata = tmp_path / "metadata.json"
+    metadata.write_text("[1, 2, 3]", encoding="utf-8")
+    assert any("not a JSON object" in error for error in validate(path, metadata))
+
+
+def test_matching_metadata_passes(tmp_path):
+    path = write_artifact(tmp_path, [TagEntry("a", 0, 10, False)])
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    write_metadata(
+        tmp_path,
+        counts={"tags": 1, "aliases": 0, "deprecated": 0},
+        artifact={"file": "tags.bin.gz", "sha256": digest, "size": path.stat().st_size, "raw_size": 0},
+    )
+    assert validate(path, tmp_path / "metadata.json") == []
+
+
 def test_metadata_count_mismatch_is_reported(tmp_path):
     path = write_artifact(tmp_path, [TagEntry("a", 0, 10, False)])
     write_metadata(tmp_path, counts={"tags": 99, "aliases": 0, "deprecated": 0})
     assert any("counts.tags" in error for error in validate(path, tmp_path / "metadata.json"))
+
+
+def test_metadata_deprecated_count_mismatch_is_reported(tmp_path):
+    tags = [TagEntry("a", 0, 10, False), TagEntry("b", 0, 10, True)]
+    path = write_artifact(tmp_path, tags)
+    write_metadata(tmp_path, counts={"tags": 2, "aliases": 0, "deprecated": 0})
+    assert any("counts.deprecated" in error for error in validate(path, tmp_path / "metadata.json"))
 
 
 def test_metadata_threshold_mismatch_is_reported(tmp_path):
@@ -2399,6 +2450,18 @@ def test_validate_custom_reports_parse_errors(tmp_path):
     assert any("expected 4 columns" in warning for warning in validate_custom(path))
 
 
+def test_validate_custom_reports_an_undecodable_file(tmp_path):
+    path = tmp_path / "custom_tags.csv"
+    path.write_bytes(b"\xff\xfe\x00a,0,1,\n")
+    assert validate_custom(path)
+
+
+def test_validate_custom_reports_a_non_object_json_entry(tmp_path):
+    path = tmp_path / "custom_tags.json"
+    path.write_text('[{"tag": "a", "alias": 5}]', encoding="utf-8")
+    assert validate_custom(path)
+
+
 def test_valid_categories_matches_danbooru():
     assert VALID_CATEGORIES == frozenset({0, 1, 3, 4, 5})
 ```
@@ -2416,16 +2479,20 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'build.validate_databa
 from __future__ import annotations
 
 import argparse
+import csv
 import gzip
 import hashlib
 import json
 import sys
+import zlib
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from artifact import VALID_CATEGORIES, decode, load_custom  # noqa: E402
+
+READ_ERRORS = (OSError, EOFError, zlib.error, gzip.BadGzipFile)
 
 
 def read_artifact(path: Path) -> bytes:
@@ -2440,10 +2507,11 @@ def validate(
     metadata_path: Path | None = None,
     post_count_limit: int = 50_000_000,
 ) -> list[str]:
+    """Return error strings for a built artifact. Never raises for bad input."""
     errors: list[str] = []
     try:
         raw = read_artifact(artifact_path)
-    except (OSError, gzip.BadGzipFile) as exc:
+    except READ_ERRORS as exc:
         return [f"artifact could not be read: {exc}"]
 
     try:
@@ -2451,6 +2519,7 @@ def validate(
     except ValueError as exc:
         return [f"artifact decode failed: {exc}"]
 
+    deprecated_count = 0
     for index in range(artifact.n_tags):
         name = artifact.name(index)
         if not name.strip():
@@ -2459,6 +2528,8 @@ def validate(
             errors.append(f"tag {index} ({name}): invalid category {artifact.category(index)}")
         if artifact.post_count(index) > post_count_limit:
             errors.append(f"tag {index} ({name}): implausible post_count {artifact.post_count(index)}")
+        if artifact.deprecated(index):
+            deprecated_count += 1
 
     tag_names = {artifact.name(index) for index in range(artifact.n_tags)}
     for index in range(artifact.n_aliases):
@@ -2469,28 +2540,56 @@ def validate(
             errors.append(f"alias {index} ({alias}): target is deprecated")
 
     if metadata_path is not None and metadata_path.exists():
+        errors.extend(_validate_metadata(artifact_path, metadata_path, artifact, deprecated_count))
+    return errors
+
+
+def _validate_metadata(
+    artifact_path: Path,
+    metadata_path: Path,
+    artifact,
+    deprecated_count: int,
+) -> list[str]:
+    try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        counts = metadata.get("counts", {})
-        if counts.get("tags") != artifact.n_tags:
-            errors.append(f"metadata counts.tags {counts.get('tags')} != {artifact.n_tags}")
-        if counts.get("aliases") != artifact.n_aliases:
-            errors.append(f"metadata counts.aliases {counts.get('aliases')} != {artifact.n_aliases}")
-        if metadata.get("threshold") != artifact.threshold:
-            errors.append(f"metadata threshold {metadata.get('threshold')} != {artifact.threshold}")
-        digest = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
-        if metadata.get("artifact", {}).get("sha256") != digest:
-            errors.append("metadata artifact.sha256 does not match the file")
+    except (OSError, ValueError) as exc:
+        return [f"metadata could not be read: {exc}"]
+    if not isinstance(metadata, dict):
+        return ["metadata is not a JSON object"]
+
+    errors: list[str] = []
+    counts = metadata.get("counts")
+    if not isinstance(counts, dict):
+        errors.append("metadata counts is not an object")
+        counts = {}
+    artifact_meta = metadata.get("artifact")
+    if not isinstance(artifact_meta, dict):
+        errors.append("metadata artifact is not an object")
+        artifact_meta = {}
+
+    if counts.get("tags") != artifact.n_tags:
+        errors.append(f"metadata counts.tags {counts.get('tags')} != {artifact.n_tags}")
+    if counts.get("aliases") != artifact.n_aliases:
+        errors.append(f"metadata counts.aliases {counts.get('aliases')} != {artifact.n_aliases}")
+    if counts.get("deprecated") != deprecated_count:
+        errors.append(f"metadata counts.deprecated {counts.get('deprecated')} != {deprecated_count}")
+    if metadata.get("threshold") != artifact.threshold:
+        errors.append(f"metadata threshold {metadata.get('threshold')} != {artifact.threshold}")
+    digest = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    if artifact_meta.get("sha256") != digest:
+        errors.append("metadata artifact.sha256 does not match the file")
     return errors
 
 
 def validate_custom(path: Path) -> list[str]:
+    """Return warning strings for a custom tag file. Never raises for bad input."""
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         return [f"custom file could not be read: {exc}"]
     try:
         result = load_custom(text, path.name)
-    except ValueError as exc:
+    except (ValueError, TypeError, csv.Error) as exc:
         return [f"custom file parse error: {exc}"]
     return list(result.warnings)
 
@@ -2523,9 +2622,12 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_validate.py -v`
-Expected: PASS (14 passed)
+Expected: PASS (21 passed)
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Run the whole suite and commit**
+
+Run: `.venv/bin/python -m pytest -q`
+Expected: PASS
 
 ```bash
 git add build/validate_database.py tests/test_validate.py
