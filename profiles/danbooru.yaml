@@ -1,0 +1,5 @@
+name: danbooru
+threshold: 25
+exclude_categories: []
+exclude_deprecated: true
+extra_sources: []
