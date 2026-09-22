@@ -13,3 +13,6 @@ web = "web"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: exercises a full-size synthetic artifact; run with -m slow",
+]
