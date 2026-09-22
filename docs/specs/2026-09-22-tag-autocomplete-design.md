@@ -556,7 +556,7 @@ pytest:
 
 ## 17. 가정과 미확인 사항
 
-- repo slug는 `chynggi/ComfyUI-Danbooru-Tag-Autocomplete`로 가정한다. GitHub Actions와 릴리스 URL이 이 값에 의존하므로 확정이 필요하다.
+- repo slug는 `chynggi/ComfyUI-Danbooru-Tag-Autocomplete`로 확정했다(2026-09-22 공개 repo 생성). GitHub Actions와 릴리스 URL이 이 값에 의존한다.
 - Nodes 2.0 환경에서 전역 textarea 후킹이 실제로 동작하는지는 실기 검증이 필요하다. MutationObserver fallback을 그 대비책으로 둔다.
 - HDiffusion dataset이 계속 갱신되는지, 라이선스가 명확해지는지는 보장할 수 없다. 소스 교체 가능 구조와 폴백으로 대응한다.
 - `hlibr`는 2026-04-08 단일 스냅샷이다. 저빈도 태그의 count와 deprecated 정보는 그 시점 기준이다.
