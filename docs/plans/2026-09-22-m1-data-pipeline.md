@@ -1614,8 +1614,15 @@ def test_hdiffusion_latest_entry_raises_without_matches():
 
 
 def test_hdiffusion_rejects_row_with_too_few_columns(tmp_path):
-    with pytest.raises(ValueError, match="at least 3 columns"):
+    with pytest.raises(ValueError, match="expected 3 or 4 columns"):
         HDiffusionSource().read(write_hdiffusion_fixture(tmp_path, "broken,0\n"))
+
+
+def test_hdiffusion_rejects_an_extra_column(tmp_path):
+    with pytest.raises(ValueError, match="expected 3 or 4 columns"):
+        HDiffusionSource().read(
+            write_hdiffusion_fixture(tmp_path, "1girl,0,8446417,sole_female,1girls\n")
+        )
 
 
 def test_hdiffusion_rejects_numeric_columns_that_are_not_numbers(tmp_path):
@@ -1677,8 +1684,8 @@ class HDiffusionSource:
             for line_number, row in enumerate(csv.reader(handle), 1):
                 if not row or not any(cell.strip() for cell in row):
                     continue
-                if len(row) < 3:
-                    raise ValueError(f"{self.id}:{line_number}: expected at least 3 columns, got {len(row)}")
+                if len(row) not in (3, 4):
+                    raise ValueError(f"{self.id}:{line_number}: expected 3 or 4 columns, got {len(row)}")
                 name = normalize_tag(row[0])
                 if not name:
                     raise ValueError(f"{self.id}:{line_number}: empty tag name")
@@ -1701,7 +1708,7 @@ class HDiffusionSource:
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `.venv/bin/python -m pytest tests/test_sources.py -v`
-Expected: PASS (8 passed)
+Expected: PASS (9 passed)
 
 - [ ] **Step 5: Commit**
 
