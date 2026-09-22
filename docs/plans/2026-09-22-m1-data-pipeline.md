@@ -559,13 +559,13 @@ def build_index(custom: Artifact | None = None) -> TagIndex:
         tags=(
             TagEntry("1girl", 0, 5000, False),
             TagEntry("blue_hair", 0, 1200, False),
-            TagEntry("blue_hairband", 0, 82, False),
             TagEntry("blue_hair_ornament", 0, 30, False),
+            TagEntry("blue_hairband", 0, 82, False),
             TagEntry("hatsune_miku", 4, 900, False),
             TagEntry("old_tag", 0, 10, True),
         ),
-        aliases=("miku", "blu_hair", "oldtag"),
-        alias_target=(4, 1, 4),
+        aliases=("blu_hair", "miku", "oldtag"),
+        alias_target=(1, 4, 4),
     )
     return TagIndex(Artifact.from_tagset(tagset), custom=custom)
 
@@ -816,8 +816,8 @@ TAGSET = TagSet(
     tags=(
         TagEntry("1girl", 0, 5000, False),
         TagEntry("blue_hair", 0, 1200, False),
-        TagEntry("blue_hairband", 0, 82, False),
         TagEntry("blue_hair_ornament", 0, 30, False),
+        TagEntry("blue_hairband", 0, 82, False),
         TagEntry("hatsune_miku", 4, 900, False),
         TagEntry("highres", 5, 700, False),
         TagEntry("old_tag", 0, 10, True),
@@ -2649,7 +2649,7 @@ from artifact import Artifact, TagEntry, TagIndex, TagSet, build_custom_overlay
 def main_artifact() -> Artifact:
     return Artifact.from_tagset(TagSet(
         threshold=25,
-        tags=(TagEntry("blue_hair", 0, 1200, False), TagEntry("1girl", 0, 5000, False)),
+        tags=(TagEntry("1girl", 0, 5000, False), TagEntry("blue_hair", 0, 1200, False)),
         aliases=(),
         alias_target=(),
     ))
