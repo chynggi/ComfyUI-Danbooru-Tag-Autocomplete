@@ -73,3 +73,50 @@ def test_hlibr_missing_tag_column_raises(tmp_path):
     )
     with pytest.raises(ValueError, match="missing columns"):
         HlibrSource().read(fetched)
+
+
+from build.sources.hdiffusion import HDiffusionSource
+
+
+def write_hdiffusion_fixture(directory: Path, text: str) -> FetchResult:
+    path = directory / "danbooru-2026-09-22.csv"
+    path.write_text(text, encoding="utf-8")
+    return FetchResult(HDiffusionSource.id, "revision-sha", "2026-09-22", {"csv": path})
+
+
+def test_hdiffusion_reads_headerless_csv(tmp_path):
+    fetched = write_hdiffusion_fixture(
+        tmp_path,
+        '1girl,0,8446417,"sole_female,1girls"\nhighres,5,8198922,"high_res,high_resolution"\n',
+    )
+    data = HDiffusionSource().read(fetched)
+    assert set(data.tags) == {"1girl", "highres"}
+    assert data.tags["1girl"].post_count == 8446417
+    assert data.tags["highres"].category == 5
+    assert data.tags["1girl"].aliases == ("sole_female", "1girls")
+    assert data.aliases == {"sole_female": "1girl", "1girls": "1girl", "high_res": "highres", "high_resolution": "highres"}
+
+
+def test_hdiffusion_latest_entry_picks_newest_date():
+    entries = [
+        {"path": "danbooru-2026-09-20.csv"},
+        {"path": "danbooru-2026-09-22.csv"},
+        {"path": "README.md"},
+        {"path": "danbooru-2026-09-21.csv"},
+    ]
+    assert HDiffusionSource().latest_entry(entries) == ("2026-09-22", "danbooru-2026-09-22.csv")
+
+
+def test_hdiffusion_latest_entry_raises_without_matches():
+    with pytest.raises(RuntimeError, match="no danbooru-"):
+        HDiffusionSource().latest_entry([{"path": "README.md"}])
+
+
+def test_hdiffusion_rejects_row_with_too_few_columns(tmp_path):
+    with pytest.raises(ValueError, match="at least 3 columns"):
+        HDiffusionSource().read(write_hdiffusion_fixture(tmp_path, "broken,0\n"))
+
+
+def test_hdiffusion_rejects_numeric_columns_that_are_not_numbers(tmp_path):
+    with pytest.raises(ValueError):
+        HDiffusionSource().read(write_hdiffusion_fixture(tmp_path, "tag,category,count\n"))
