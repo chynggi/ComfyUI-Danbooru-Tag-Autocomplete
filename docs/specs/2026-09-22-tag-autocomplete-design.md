@@ -499,11 +499,17 @@ extra_sources: []
 ### 13.2 custom tag DB (런타임 오버레이)
 
 - 위치: `user/danbooru-tag-autocomplete/custom_tags.csv` 또는 `custom_tags.json`.
-- CSV 포맷: `tag,category,post_count,alias` (alias는 `,`로 구분한 문자열).
-- JSON 포맷: `[{"tag": "...", "category": 0, "post_count": 0, "alias": ["..."]}]`
+- CSV 포맷: `tag,category,post_count,alias`. JSON 포맷: `[{"tag": "...", "category": 0, "post_count": 0, "alias": ["..."]}]`.
+- 행의 의미:
+  - `alias` 열이 비면 그 행은 **태그 선언**이다. `category`와 `post_count`를 사용한다.
+    예: `example_tag,general,0,`
+  - `alias` 열이 비어 있지 않으면 그 행은 **별칭 선언**이다. 행의 `tag`는 태그가 아니라 별칭 이름이고, 열의 값이 canonical 대상이다. 대상이 여러 개면 첫 번째만 쓰고 경고한다.
+    예: `my_old_tag,general,0,example_tag` → `my_old_tag`가 `example_tag`로 연결된다.
+  - 같은 이름이 태그로도 별칭으로도 선언되면 태그 선언이 이기고 별칭 선언은 버린다.
+  - 대상이 custom 행에도 main 인덱스에도 없으면 그 별칭은 경고와 함께 버린다. 대상이 main 인덱스에 있으면 그 항목을 오버레이로 복사해 `alias_target`이 가리킬 수 있게 한다.
+- `category`는 Danbooru 숫자(`0/1/3/4/5`)와 이름(`general/artist/copyright/character/meta`)을 모두 받는다. 범위 밖 숫자는 경고 후 `general`로 떨어지고, 숫자로도 이름으로도 해석할 수 없으면 오류다.
 - 빌드 산출물에 포함되지 않는다. 노드는 파일을 읽어 메모리 오버레이로, 프론트는 `/custom` 응답으로 받아 검색 시 병합한다.
 - custom 항목이 main 인덱스와 같은 이름이면 custom이 이긴다(custom 우선).
-- custom alias는 custom과 main 양쪽의 canonical을 가리킬 수 있다.
 - 형식 오류는 오버레이를 비우고 사용자에게 보고한다. main 검색은 계속 동작한다.
 
 ## 14. 라이선스

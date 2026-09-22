@@ -897,11 +897,34 @@ git commit -m "Add tag search index and shared fixture"
 - Consumes: `normalize_tag`, `TagEntry`, `TagSet`
 - Produces:
   - `artifact.VALID_CATEGORIES: frozenset[int]`
+  - `artifact.CATEGORY_NAMES: dict[str, int]`
+  - `artifact.parse_category(value: str) -> int`
   - `artifact.CustomParseResult(tagset: TagSet, warnings: tuple[str, ...])`
   - `artifact.build_custom_tagset(rows: list[tuple[str, int, int, tuple[str, ...]]], lookup: Callable[[str], TagEntry | None] | None = None, threshold: int = 0) -> CustomParseResult`
   - `artifact.parse_custom_csv(text: str, lookup=None, threshold: int = 0) -> CustomParseResult`
   - `artifact.parse_custom_json(text: str, lookup=None, threshold: int = 0) -> CustomParseResult`
   - `artifact.load_custom(text: str, path_hint: str, lookup=None, threshold: int = 0) -> CustomParseResult`
+
+**Row semantics (the model this task implements):**
+
+A custom row declares a name and, optionally, the canonical tag that name maps to.
+
+- Empty trailing alias column → the row declares a **tag**; `category` and `post_count` are used.
+- Non-empty trailing alias column → the row declares an **alias mapping**; the row's `tag` is the alias name (it is *not* also declared as a tag) and the column names the canonical target. Extra targets beyond the first are ignored with a warning.
+- `category` accepts either a Danbooru number (`0/1/3/4/5`) or its name (`general/artist/copyright/character/meta`). An out-of-range number is a warning and falls back to `general`; an unparseable value is a hard error.
+- A name declared as both a tag and an alias is kept as a tag, and its alias declaration is dropped with a warning.
+- An alias target that the custom rows do not declare is resolved through `lookup` (normally the main artifact). If it resolves, the target entry is copied into the overlay so `alias_target` can index it. If it does not resolve, the alias is dropped with a warning.
+- Recoverable problems (unknown target, self-reference, out-of-range category, empty name, extra targets) are **warnings**. Malformed input (wrong column count, unparseable number or category, non-list JSON, missing `tag` key) raises `ValueError`.
+
+Worked example that must work verbatim (from the design spec):
+
+```csv
+tag,category,post_count,alias
+example_tag,general,0,
+my_old_tag,general,0,example_tag
+```
+
+→ the overlay declares the tag `example_tag` and the alias `my_old_tag → example_tag`.
 
 - [ ] **Step 1: Write the failing custom parsing tests**
 
@@ -910,26 +933,71 @@ git commit -m "Add tag search index and shared fixture"
 ```python
 import pytest
 
-from artifact import TagEntry, build_custom_tagset, load_custom, parse_custom_csv, parse_custom_json
+from artifact import TagEntry, load_custom, parse_custom_csv, parse_custom_json
 
 
-def test_csv_parses_all_columns():
-    result = parse_custom_csv('my_tag,4,120,"old_name,other_old"\n')
+def test_empty_alias_column_declares_a_tag():
+    result = parse_custom_csv("my_tag,4,120,\n")
     assert [entry.name for entry in result.tagset.tags] == ["my_tag"]
     assert result.tagset.tags[0].category == 4
     assert result.tagset.tags[0].post_count == 120
-    assert result.tagset.aliases == ("old_name", "other_old")
-    assert set(result.tagset.alias_target) == {0}
+    assert result.tagset.tags[0].deprecated is False
+    assert result.tagset.aliases == ()
+    assert result.warnings == ()
 
 
-def test_csv_header_row_is_skipped():
+def test_spec_worked_example_maps_an_old_tag_onto_a_new_one():
+    result = parse_custom_csv("tag,category,post_count,alias\nexample_tag,general,0,\nmy_old_tag,general,0,example_tag\n")
+    assert [entry.name for entry in result.tagset.tags] == ["example_tag"]
+    assert result.tagset.tags[0].category == 0
+    assert result.tagset.aliases == ("my_old_tag",)
+    assert result.tagset.tags[result.tagset.alias_target[0]].name == "example_tag"
+    assert result.warnings == ()
+
+
+def test_alias_target_can_be_a_main_tag_resolved_by_lookup():
+    lookup = lambda name: TagEntry("blue_hair", 0, 999, False) if name == "blue_hair" else None
+    result = parse_custom_csv("blu_hair,0,0,blue_hair\n", lookup=lookup)
+    assert [entry.name for entry in result.tagset.tags] == ["blue_hair"]
+    assert result.tagset.tags[0].post_count == 999
+    assert result.tagset.aliases == ("blu_hair",)
+    assert result.warnings == ()
+
+
+def test_unknown_alias_target_is_reported_and_dropped():
+    result = parse_custom_csv("my_tag,0,1,nope\n")
+    assert result.tagset.tags == ()
+    assert result.tagset.aliases == ()
+    assert any("unknown alias target" in warning for warning in result.warnings)
+
+
+def test_alias_pointing_at_itself_is_dropped():
+    result = parse_custom_csv("my_tag,0,1,my_tag\n")
+    assert result.tagset.aliases == ()
+    assert any("itself" in warning for warning in result.warnings)
+
+
+def test_tag_declaration_wins_over_an_alias_mapping_for_the_same_name():
+    result = parse_custom_csv("a,0,1,\nb,0,1,\na,0,0,b\n")
+    assert [entry.name for entry in result.tagset.tags] == ["a", "b"]
+    assert result.tagset.aliases == ()
+    assert any("declared as a tag" in warning for warning in result.warnings)
+
+
+def test_extra_alias_targets_use_the_first_and_warn():
+    result = parse_custom_csv('example_tag,0,0,\nmy_old_tag,0,0,"example_tag,other"\n')
+    assert result.tagset.aliases == ("my_old_tag",)
+    assert result.tagset.tags[result.tagset.alias_target[0]].name == "example_tag"
+    assert any("first alias target" in warning for warning in result.warnings)
+
+
+def test_header_row_is_skipped():
     result = parse_custom_csv("tag,category,post_count,alias\nmy_tag,0,1,\n")
     assert [entry.name for entry in result.tagset.tags] == ["my_tag"]
 
 
-def test_csv_names_are_normalized():
-    result = parse_custom_csv("My Tag,0,1,\n")
-    assert result.tagset.tags[0].name == "my_tag"
+def test_names_are_normalized():
+    assert parse_custom_csv("My Tag,0,1,\n").tagset.tags[0].name == "my_tag"
 
 
 def test_csv_trailing_comma_is_tolerated():
@@ -941,42 +1009,44 @@ def test_csv_with_too_many_columns_raises():
         parse_custom_csv("a,0,1,x,y\n")
 
 
-def test_alias_to_missing_target_is_reported_and_dropped():
-    result = parse_custom_csv("a,0,1,nope\n")
-    assert result.tagset.aliases == ()
-    assert any("unknown alias target" in warning for warning in result.warnings)
+def test_category_names_are_accepted():
+    assert parse_custom_csv("a,character,1,\n").tagset.tags[0].category == 4
+    assert parse_custom_csv("a,ARTIST,1,\n").tagset.tags[0].category == 1
 
 
-def test_alias_to_main_tag_is_resolved_with_lookup():
-    lookup = lambda name: TagEntry("blue_hair", 0, 999, False) if name == "blue_hair" else None
-    result = parse_custom_csv("blu,0,0,blue_hair\n", lookup=lookup)
-    assert [entry.name for entry in result.tagset.tags] == ["blu", "blue_hair"]
-    assert result.tagset.aliases == ("blu",)
-    assert result.tagset.tags[result.tagset.alias_target[0]].name == "blue_hair"
+def test_unparseable_category_raises():
+    with pytest.raises(ValueError, match="custom CSV line 1"):
+        parse_custom_csv("a,banana,1,\n")
 
 
-def test_alias_matching_its_own_tag_name_is_dropped():
-    result = parse_custom_csv("a,0,1,a\n")
-    assert result.tagset.aliases == ()
-    assert any("itself" in warning for warning in result.warnings)
-
-
-def test_invalid_category_warns_and_falls_back_to_general():
+def test_out_of_range_category_warns_and_falls_back_to_general():
     result = parse_custom_csv("a,99,1,\n")
     assert result.tagset.tags[0].category == 0
     assert any("invalid category" in warning for warning in result.warnings)
 
 
-def test_json_list_is_parsed():
-    result = parse_custom_json('[{"tag": "my_tag", "category": 1, "post_count": 5, "alias": ["old"]}]')
-    assert result.tagset.tags[0].name == "my_tag"
-    assert result.tagset.tags[0].category == 1
-    assert result.tagset.aliases == ("old",)
+def test_empty_tag_name_is_skipped_with_a_warning():
+    result = parse_custom_csv(" ,0,1,\n")
+    assert result.tagset.tags == ()
+    assert any("empty tag name" in warning for warning in result.warnings)
+
+
+def test_json_declares_a_tag_and_an_alias():
+    result = parse_custom_json('[{"tag": "example_tag"}, {"tag": "my_old_tag", "alias": ["example_tag"]}]')
+    assert [entry.name for entry in result.tagset.tags] == ["example_tag"]
+    assert result.tagset.aliases == ("my_old_tag",)
+    assert result.warnings == ()
+
+
+def test_json_accepts_a_category_name():
+    assert parse_custom_json('[{"tag": "a", "category": "copyright"}]').tagset.tags[0].category == 3
 
 
 def test_json_alias_as_string_is_split():
-    result = parse_custom_json('[{"tag": "a", "alias": "x,y"}]')
-    assert result.tagset.aliases == ("x", "y")
+    result = parse_custom_json('[{"tag": "example_tag"}, {"tag": "old", "alias": "example_tag,other"}]')
+    assert result.tagset.tags[0].name == "example_tag"
+    assert result.tagset.aliases == ("old",)
+    assert any("first alias target" in warning for warning in result.warnings)
 
 
 def test_json_without_tag_key_raises():
@@ -984,7 +1054,7 @@ def test_json_without_tag_key_raises():
         parse_custom_json('[{"name": "a"}]')
 
 
-def test_load_custom_uses_extension():
+def test_load_custom_uses_the_file_extension():
     assert load_custom("a,0,1,\n", "custom_tags.csv").tagset.tags[0].name == "a"
     assert load_custom('[{"tag": "a"}]', "custom_tags.json").tagset.tags[0].name == "a"
 ```
@@ -996,10 +1066,21 @@ Expected: FAIL with `ImportError: cannot import name 'parse_custom_csv'`
 
 - [ ] **Step 3: Append the custom parsing implementation to `artifact.py`**
 
-Add `import csv`, `import io`, `import json`, and `from typing import Callable` to the imports at the top of `artifact.py`, then append:
+Add `import csv`, `import io`, `import json` and `from typing import Callable` to the module imports at the top of `artifact.py`, then append:
 
 ```python
 VALID_CATEGORIES = frozenset({0, 1, 3, 4, 5})
+CATEGORY_NAMES = {"general": 0, "artist": 1, "copyright": 3, "character": 4, "meta": 5}
+
+
+def parse_category(value: str) -> int:
+    """Accept a Danbooru category number or its name. Raises ValueError otherwise."""
+    text = value.strip().lower()
+    if not text:
+        return 0
+    if text in CATEGORY_NAMES:
+        return CATEGORY_NAMES[text]
+    return int(text)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1015,29 +1096,41 @@ def build_custom_tagset(
 ) -> CustomParseResult:
     """Turn parsed custom rows into a TagSet usable as a search overlay.
 
-    `lookup` resolves alias targets that are not defined in the custom rows,
-    typically by finding the name in the main artifact.
+    Each row declares a name and optionally the canonical tag it maps to:
+    an empty target tuple declares a tag, a non-empty one declares the row's
+    tag as an alias of the first target. Targets the custom rows do not declare
+    are resolved through `lookup`, normally the main artifact.
     """
     warnings: list[str] = []
-    entries: dict[str, TagEntry] = {}
-    alias_pairs: list[tuple[str, str]] = []
+    tag_rows: dict[str, tuple[int, int]] = {}
+    alias_rows: list[tuple[str, tuple[str, ...]]] = []
 
-    for name, category, post_count, aliases in rows:
+    for name, category, post_count, targets in rows:
         normalized = normalize_tag(name)
         if not normalized:
             warnings.append("skipped a custom row with an empty tag name")
             continue
+        if targets:
+            alias_rows.append((normalized, tuple(normalize_tag(target) for target in targets)))
+            continue
         if category not in VALID_CATEGORIES:
             warnings.append(f"{normalized}: invalid category {category}, using 0")
             category = 0
-        entries[normalized] = TagEntry(normalized, category, max(0, post_count), False)
-        for alias in aliases:
-            normalized_alias = normalize_tag(alias)
-            if normalized_alias:
-                alias_pairs.append((normalized_alias, normalized))
+        tag_rows[normalized] = (category, max(0, post_count))
+
+    entries: dict[str, TagEntry] = {
+        name: TagEntry(name, category, post_count, False)
+        for name, (category, post_count) in tag_rows.items()
+    }
 
     resolved: dict[str, str] = {}
-    for alias, target in alias_pairs:
+    for alias, targets in alias_rows:
+        if alias in entries:
+            warnings.append(f"{alias}: declared as a tag, ignoring its alias mapping")
+            continue
+        if len(targets) > 1:
+            warnings.append(f"{alias}: only the first alias target is used")
+        target = targets[0]
         if alias == target:
             warnings.append(f"{alias}: alias points to itself")
             continue
@@ -1051,10 +1144,7 @@ def build_custom_tagset(
 
     ordered = sorted(entries.items(), key=lambda item: item[0].encode("utf-8"))
     index_of = {name: index for index, (name, _) in enumerate(ordered)}
-    alias_names = sorted(
-        (alias for alias in resolved if alias not in index_of),
-        key=lambda alias: alias.encode("utf-8"),
-    )
+    alias_names = sorted(resolved, key=lambda alias: alias.encode("utf-8"))
     return CustomParseResult(
         tagset=TagSet(
             threshold=threshold,
@@ -1087,9 +1177,9 @@ def parse_custom_csv(
         try:
             rows.append((
                 name,
-                int(category) if category else 0,
+                parse_category(category),
                 int(post_count) if post_count else 0,
-                tuple(alias.strip() for alias in alias_cell.split(",") if alias.strip()),
+                tuple(target.strip() for target in alias_cell.split(",") if target.strip()),
             ))
         except ValueError as exc:
             raise ValueError(f"custom CSV line {line_number}: {exc}") from exc
@@ -1108,17 +1198,17 @@ def parse_custom_json(
     for position, item in enumerate(payload, 1):
         if not isinstance(item, dict) or "tag" not in item:
             raise ValueError(f"custom JSON entry {position}: expected an object with a 'tag' key")
-        aliases = item.get("alias") or []
-        if isinstance(aliases, str):
-            alias_tuple = tuple(alias.strip() for alias in aliases.split(",") if alias.strip())
+        try:
+            category = parse_category(str(item.get("category", 0)))
+            post_count = int(item.get("post_count", 0))
+        except ValueError as exc:
+            raise ValueError(f"custom JSON entry {position}: {exc}") from exc
+        targets = item.get("alias") or []
+        if isinstance(targets, str):
+            target_tuple = tuple(target.strip() for target in targets.split(",") if target.strip())
         else:
-            alias_tuple = tuple(str(alias).strip() for alias in aliases if str(alias).strip())
-        rows.append((
-            str(item["tag"]),
-            int(item.get("category", 0)),
-            int(item.get("post_count", 0)),
-            alias_tuple,
-        ))
+            target_tuple = tuple(str(target).strip() for target in targets if str(target).strip())
+        rows.append((str(item["tag"]), category, post_count, target_tuple))
     return build_custom_tagset(rows, lookup=lookup, threshold=threshold)
 
 
@@ -1136,7 +1226,7 @@ def load_custom(
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_custom.py -v`
-Expected: PASS (14 passed)
+Expected: PASS (20 passed)
 
 - [ ] **Step 5: Commit**
 
@@ -2659,16 +2749,13 @@ def test_overlay_resolves_aliases_that_point_at_main_tags():
     overlay, warnings = build_custom_overlay(main_artifact(), "blu,0,0,blue_hair\n", "custom_tags.csv")
     assert warnings == ()
     index = TagIndex(main_artifact(), custom=overlay)
-    names = [hit.name for hit in index.search("blu")]
-    assert "blue_hair" in names
-    assert "blu" in names
+    assert [hit.name for hit in index.search("blu")] == ["blue_hair"]
 
 
-def test_overlay_reports_unknown_targets_and_still_works():
+def test_overlay_reports_unknown_targets_and_returns_none():
     overlay, warnings = build_custom_overlay(main_artifact(), "my_tag,0,0,nope\n", "custom_tags.csv")
+    assert overlay is None
     assert any("unknown alias target" in warning for warning in warnings)
-    index = TagIndex(main_artifact(), custom=overlay)
-    assert [hit.name for hit in index.search("my_tag")] == ["my_tag"]
 
 
 def test_overlay_returns_none_for_empty_text():
