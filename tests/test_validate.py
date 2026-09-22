@@ -1,4 +1,5 @@
 import gzip
+import hashlib
 import json
 
 from artifact import TagEntry, TagSet, VALID_CATEGORIES, encode
@@ -44,8 +45,7 @@ def test_gzip_and_plain_buffers_are_both_accepted(tmp_path):
 
 def test_invalid_category_is_reported(tmp_path):
     path = write_artifact(tmp_path, [TagEntry("a", 2, 10, False)])
-    errors = validate(path)
-    assert any("invalid category" in error for error in errors)
+    assert any("invalid category" in error for error in validate(path))
 
 
 def test_empty_name_is_reported(tmp_path):
@@ -69,10 +69,57 @@ def test_alias_pointing_at_deprecated_target_is_reported(tmp_path):
     assert any("target is deprecated" in error for error in validate(path))
 
 
+def test_truncated_gzip_is_reported_not_raised(tmp_path):
+    path = write_artifact(tmp_path, [TagEntry("a", 0, 10, False)])
+    path.write_bytes(path.read_bytes()[:-8])
+    errors = validate(path)
+    assert errors and "could not be read" in errors[0]
+
+
+def test_corrupt_gzip_body_is_reported_not_raised(tmp_path):
+    path = write_artifact(tmp_path, [TagEntry("a", 0, 10, False)])
+    data = bytearray(path.read_bytes())
+    data[len(data) // 2] ^= 0xFF
+    path.write_bytes(bytes(data))
+    assert validate(path)
+
+
+def test_malformed_metadata_is_reported_not_raised(tmp_path):
+    path = write_artifact(tmp_path, [TagEntry("a", 0, 10, False)])
+    metadata = tmp_path / "metadata.json"
+    metadata.write_text("{not json", encoding="utf-8")
+    assert any("metadata could not be read" in error for error in validate(path, metadata))
+
+
+def test_metadata_that_is_not_an_object_is_reported(tmp_path):
+    path = write_artifact(tmp_path, [TagEntry("a", 0, 10, False)])
+    metadata = tmp_path / "metadata.json"
+    metadata.write_text("[1, 2, 3]", encoding="utf-8")
+    assert any("not a JSON object" in error for error in validate(path, metadata))
+
+
+def test_matching_metadata_passes(tmp_path):
+    path = write_artifact(tmp_path, [TagEntry("a", 0, 10, False)])
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    write_metadata(
+        tmp_path,
+        counts={"tags": 1, "aliases": 0, "deprecated": 0},
+        artifact={"file": "tags.bin.gz", "sha256": digest, "size": path.stat().st_size, "raw_size": 0},
+    )
+    assert validate(path, tmp_path / "metadata.json") == []
+
+
 def test_metadata_count_mismatch_is_reported(tmp_path):
     path = write_artifact(tmp_path, [TagEntry("a", 0, 10, False)])
     write_metadata(tmp_path, counts={"tags": 99, "aliases": 0, "deprecated": 0})
     assert any("counts.tags" in error for error in validate(path, tmp_path / "metadata.json"))
+
+
+def test_metadata_deprecated_count_mismatch_is_reported(tmp_path):
+    tags = [TagEntry("a", 0, 10, False), TagEntry("b", 0, 10, True)]
+    path = write_artifact(tmp_path, tags)
+    write_metadata(tmp_path, counts={"tags": 2, "aliases": 0, "deprecated": 0})
+    assert any("counts.deprecated" in error for error in validate(path, tmp_path / "metadata.json"))
 
 
 def test_metadata_threshold_mismatch_is_reported(tmp_path):
@@ -107,6 +154,18 @@ def test_validate_custom_reports_parse_errors(tmp_path):
     path = tmp_path / "custom_tags.csv"
     path.write_text("a,0,1,x,y\n", encoding="utf-8")
     assert any("expected 4 columns" in warning for warning in validate_custom(path))
+
+
+def test_validate_custom_reports_an_undecodable_file(tmp_path):
+    path = tmp_path / "custom_tags.csv"
+    path.write_bytes(b"\xff\xfe\x00a,0,1,\n")
+    assert validate_custom(path)
+
+
+def test_validate_custom_reports_a_non_object_json_entry(tmp_path):
+    path = tmp_path / "custom_tags.json"
+    path.write_text('[{"tag": "a", "alias": 5}]', encoding="utf-8")
+    assert validate_custom(path)
 
 
 def test_valid_categories_matches_danbooru():
