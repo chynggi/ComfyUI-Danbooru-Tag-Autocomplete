@@ -571,3 +571,29 @@ def load_custom(
     if path_hint.lower().endswith(".json"):
         return parse_custom_json(text, lookup=lookup, threshold=threshold)
     return parse_custom_csv(text, lookup=lookup, threshold=threshold)
+
+
+def build_custom_overlay(
+    main: Artifact,
+    text: str,
+    path_hint: str,
+) -> tuple[Artifact | None, tuple[str, ...]]:
+    """Parse custom tag text into an Artifact overlay for `main`.
+
+    Alias targets that are not defined in the custom file are resolved against
+    the main artifact so custom aliases can point at upstream tags.
+    Raises ValueError on a hard parse error.
+    """
+    def lookup(name: str) -> TagEntry | None:
+        key = name.encode("utf-8")
+        index = main.lower_bound_name(key)
+        if index < main.n_tags and main.name_bytes(index) == key:
+            return main.entry(index)
+        return None
+
+    if not text.strip():
+        return None, ()
+    result = load_custom(text, path_hint, lookup=lookup)
+    if not result.tagset.tags:
+        return None, result.warnings
+    return Artifact.from_tagset(result.tagset), result.warnings

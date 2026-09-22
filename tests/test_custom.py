@@ -124,3 +124,39 @@ def test_json_without_tag_key_raises():
 def test_load_custom_uses_the_file_extension():
     assert load_custom("a,0,1,\n", "custom_tags.csv").tagset.tags[0].name == "a"
     assert load_custom('[{"tag": "a"}]', "custom_tags.json").tagset.tags[0].name == "a"
+
+
+from artifact import Artifact, TagEntry, TagIndex, TagSet, build_custom_overlay
+
+
+def main_artifact() -> Artifact:
+    return Artifact.from_tagset(TagSet(
+        threshold=25,
+        tags=(TagEntry("1girl", 0, 5000, False), TagEntry("blue_hair", 0, 1200, False)),
+        aliases=(),
+        alias_target=(),
+    ))
+
+
+def test_overlay_resolves_aliases_that_point_at_main_tags():
+    overlay, warnings = build_custom_overlay(main_artifact(), "blu,0,0,blue_hair\n", "custom_tags.csv")
+    assert warnings == ()
+    index = TagIndex(main_artifact(), custom=overlay)
+    assert [hit.name for hit in index.search("blu")] == ["blue_hair"]
+
+
+def test_overlay_reports_unknown_targets_and_returns_none():
+    overlay, warnings = build_custom_overlay(main_artifact(), "my_tag,0,0,nope\n", "custom_tags.csv")
+    assert overlay is None
+    assert any("unknown alias target" in warning for warning in warnings)
+
+
+def test_overlay_returns_none_for_empty_text():
+    overlay, warnings = build_custom_overlay(main_artifact(), "", "custom_tags.csv")
+    assert overlay is None
+    assert warnings == ()
+
+
+def test_overlay_parse_error_is_raised():
+    with pytest.raises(ValueError):
+        build_custom_overlay(main_artifact(), "a,0,1,x,y\n", "custom_tags.csv")
