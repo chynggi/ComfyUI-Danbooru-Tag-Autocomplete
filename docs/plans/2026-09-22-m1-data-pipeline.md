@@ -2850,7 +2850,7 @@ git push origin main
 ### Task 10: Custom tag file path resolution
 
 **Files:**
-- Modify: `artifact.py` (append a `TagIndex.with_custom` helper)
+- Modify: `artifact.py` (append a `build_custom_overlay` helper)
 - Test: `tests/test_custom.py` (append)
 
 **Interfaces:**
@@ -2935,7 +2935,7 @@ def build_custom_overlay(
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_custom.py -v`
-Expected: PASS (18 passed)
+Expected: PASS (24 passed)
 
 - [ ] **Step 5: Run the whole fast suite and commit**
 
