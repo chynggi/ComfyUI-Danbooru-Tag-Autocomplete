@@ -306,7 +306,7 @@ def encode(tagset: TagSet) -> bytes:
     alias_target_b = struct.pack(f"<{len(tagset.alias_target)}I", *tagset.alias_target)
     category_b = bytes(tag.category for tag in tags)
     post_count_b = struct.pack(f"<{len(tags)}I", *(tag.post_count for tag in tags))
-    tag_flags_b = _pack_flag_bits(tag.deprecated for tag in tags)
+    tag_flags_b = _pack_flag_bits([tag.deprecated for tag in tags])
 
     offset = HEADER_SIZE
     off_names = offset
