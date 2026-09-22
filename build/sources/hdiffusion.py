@@ -44,8 +44,8 @@ class HDiffusionSource:
             for line_number, row in enumerate(csv.reader(handle), 1):
                 if not row or not any(cell.strip() for cell in row):
                     continue
-                if len(row) < 3:
-                    raise ValueError(f"{self.id}:{line_number}: expected at least 3 columns, got {len(row)}")
+                if len(row) not in (3, 4):
+                    raise ValueError(f"{self.id}:{line_number}: expected 3 or 4 columns, got {len(row)}")
                 name = normalize_tag(row[0])
                 if not name:
                     raise ValueError(f"{self.id}:{line_number}: empty tag name")
