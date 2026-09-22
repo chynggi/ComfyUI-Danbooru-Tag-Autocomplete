@@ -1,0 +1,2 @@
+# No runtime dependencies. requests ships with ComfyUI.
+# pyarrow and pyyaml are build/CI-only dependencies, listed in .github/workflows/update-data.yml.
