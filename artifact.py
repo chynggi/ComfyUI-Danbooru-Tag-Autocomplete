@@ -6,9 +6,13 @@ Keep it free of ComfyUI imports so the build pipeline can run standalone.
 
 from __future__ import annotations
 
+import csv
+import io
+import json
 import sys
 import struct
 from dataclasses import dataclass
+from typing import Callable
 
 MAGIC = b"DTA1"
 FORMAT_VERSION = 1
@@ -413,3 +417,157 @@ class TagIndex:
         if self._custom is not None:
             merged.update(self._search_source(self._custom, key_bytes, categories, exclude_deprecated))
         return sorted(merged.values(), key=_hit_sort_key)[:limit]
+
+
+VALID_CATEGORIES = frozenset({0, 1, 3, 4, 5})
+CATEGORY_NAMES = {"general": 0, "artist": 1, "copyright": 3, "character": 4, "meta": 5}
+
+
+def parse_category(value: str) -> int:
+    """Accept a Danbooru category number or its name. Raises ValueError otherwise."""
+    text = value.strip().lower()
+    if not text:
+        return 0
+    if text in CATEGORY_NAMES:
+        return CATEGORY_NAMES[text]
+    return int(text)
+
+
+@dataclass(frozen=True, slots=True)
+class CustomParseResult:
+    tagset: TagSet
+    warnings: tuple[str, ...]
+
+
+def build_custom_tagset(
+    rows: list[tuple[str, int, int, tuple[str, ...]]],
+    lookup: Callable[[str], TagEntry | None] | None = None,
+    threshold: int = 0,
+) -> CustomParseResult:
+    """Turn parsed custom rows into a TagSet usable as a search overlay.
+
+    Each row declares a name and optionally the canonical tag it maps to:
+    an empty target tuple declares a tag, a non-empty one declares the row's
+    tag as an alias of the first target. Targets the custom rows do not declare
+    are resolved through `lookup`, normally the main artifact.
+    """
+    warnings: list[str] = []
+    tag_rows: dict[str, tuple[int, int]] = {}
+    alias_rows: list[tuple[str, tuple[str, ...]]] = []
+
+    for name, category, post_count, targets in rows:
+        normalized = normalize_tag(name)
+        if not normalized:
+            warnings.append("skipped a custom row with an empty tag name")
+            continue
+        if targets:
+            alias_rows.append((normalized, tuple(normalize_tag(target) for target in targets)))
+            continue
+        if category not in VALID_CATEGORIES:
+            warnings.append(f"{normalized}: invalid category {category}, using 0")
+            category = 0
+        tag_rows[normalized] = (category, max(0, post_count))
+
+    entries: dict[str, TagEntry] = {
+        name: TagEntry(name, category, post_count, False)
+        for name, (category, post_count) in tag_rows.items()
+    }
+
+    resolved: dict[str, str] = {}
+    for alias, targets in alias_rows:
+        if alias in entries:
+            warnings.append(f"{alias}: declared as a tag, ignoring its alias mapping")
+            continue
+        if len(targets) > 1:
+            warnings.append(f"{alias}: only the first alias target is used")
+        target = targets[0]
+        if alias == target:
+            warnings.append(f"{alias}: alias points to itself")
+            continue
+        if target not in entries:
+            external = lookup(target) if lookup is not None else None
+            if external is None:
+                warnings.append(f"{alias}: unknown alias target {target}")
+                continue
+            entries[target] = external
+        resolved[alias] = target
+
+    ordered = sorted(entries.items(), key=lambda item: item[0].encode("utf-8"))
+    index_of = {name: index for index, (name, _) in enumerate(ordered)}
+    alias_names = sorted(resolved, key=lambda alias: alias.encode("utf-8"))
+    return CustomParseResult(
+        tagset=TagSet(
+            threshold=threshold,
+            tags=tuple(entry for _, entry in ordered),
+            aliases=tuple(alias_names),
+            alias_target=tuple(index_of[resolved[alias]] for alias in alias_names),
+        ),
+        warnings=tuple(warnings),
+    )
+
+
+def parse_custom_csv(
+    text: str,
+    lookup: Callable[[str], TagEntry | None] | None = None,
+    threshold: int = 0,
+) -> CustomParseResult:
+    rows: list[tuple[str, int, int, tuple[str, ...]]] = []
+    for line_number, row in enumerate(csv.reader(io.StringIO(text)), 1):
+        if not row or not any(cell.strip() for cell in row):
+            continue
+        if line_number == 1 and row[0].strip().lower() in ("tag", "name"):
+            continue
+        cells = [cell.strip() for cell in row]
+        while len(cells) > 4 and cells[-1] == "":
+            cells.pop()
+        if len(cells) > 4:
+            raise ValueError(f"custom CSV line {line_number}: expected 4 columns, got {len(cells)}")
+        cells += [""] * (4 - len(cells))
+        name, category, post_count, alias_cell = cells
+        try:
+            rows.append((
+                name,
+                parse_category(category),
+                int(post_count) if post_count else 0,
+                tuple(target.strip() for target in alias_cell.split(",") if target.strip()),
+            ))
+        except ValueError as exc:
+            raise ValueError(f"custom CSV line {line_number}: {exc}") from exc
+    return build_custom_tagset(rows, lookup=lookup, threshold=threshold)
+
+
+def parse_custom_json(
+    text: str,
+    lookup: Callable[[str], TagEntry | None] | None = None,
+    threshold: int = 0,
+) -> CustomParseResult:
+    payload = json.loads(text)
+    if not isinstance(payload, list):
+        raise ValueError("custom JSON must be a list of objects")
+    rows: list[tuple[str, int, int, tuple[str, ...]]] = []
+    for position, item in enumerate(payload, 1):
+        if not isinstance(item, dict) or "tag" not in item:
+            raise ValueError(f"custom JSON entry {position}: expected an object with a 'tag' key")
+        try:
+            category = parse_category(str(item.get("category", 0)))
+            post_count = int(item.get("post_count", 0))
+        except ValueError as exc:
+            raise ValueError(f"custom JSON entry {position}: {exc}") from exc
+        targets = item.get("alias") or []
+        if isinstance(targets, str):
+            target_tuple = tuple(target.strip() for target in targets.split(",") if target.strip())
+        else:
+            target_tuple = tuple(str(target).strip() for target in targets if str(target).strip())
+        rows.append((str(item["tag"]), category, post_count, target_tuple))
+    return build_custom_tagset(rows, lookup=lookup, threshold=threshold)
+
+
+def load_custom(
+    text: str,
+    path_hint: str,
+    lookup: Callable[[str], TagEntry | None] | None = None,
+    threshold: int = 0,
+) -> CustomParseResult:
+    if path_hint.lower().endswith(".json"):
+        return parse_custom_json(text, lookup=lookup, threshold=threshold)
+    return parse_custom_csv(text, lookup=lookup, threshold=threshold)
