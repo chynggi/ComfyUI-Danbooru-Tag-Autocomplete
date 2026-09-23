@@ -43,6 +43,7 @@ expected = {
             "deprecated": hit.deprecated,
             "alias": hit.alias,
             "rank": hit.rank,
+            "nameLength": hit.name_length,
         }
         for hit in index.search(query)
     ]

@@ -111,4 +111,93 @@ def test_shared_fixture_matches_python_search():
     expected = json.loads((FIXTURES / "queries.json").read_text(encoding="utf-8"))
     index = TagIndex(artifact.decode(data))
     for query, hits in expected["queries"].items():
-        assert [hit.name for hit in index.search(query)] == [hit["name"] for hit in hits], query
+        actual = [
+            {
+                "name": hit.name,
+                "category": hit.category,
+                "postCount": hit.post_count,
+                "deprecated": hit.deprecated,
+                "alias": hit.alias,
+                "rank": hit.rank,
+                "nameLength": hit.name_length,
+            }
+            for hit in index.search(query)
+        ]
+        assert actual == hits, query
+
+
+def test_a_short_prefix_fills_the_limit_from_ranked_candidates():
+    tagset = TagSet(
+        threshold=0,
+        tags=tuple(TagEntry(f"a{index:04d}", 0, 10_000 - index, False) for index in range(200)),
+        aliases=(),
+        alias_target=(),
+    )
+    hits = TagIndex(Artifact.from_tagset(tagset)).search("a", limit=5)
+    assert [hit.name for hit in hits] == ["a0000", "a0001", "a0002", "a0003", "a0004"]
+
+
+def test_category_filter_selects_from_below_the_unfiltered_top_k():
+    tags = tuple(
+        TagEntry(f"a{index:04d}", 4 if index < 40 else 0, 10_000 - index, False)
+        for index in range(80)
+    )
+    index = TagIndex(Artifact.from_tagset(TagSet(threshold=0, tags=tags, aliases=(), alias_target=())))
+    hits = index.search("a", limit=3, categories=frozenset({0}))
+    assert [hit.name for hit in hits] == ["a0040", "a0041", "a0042"]
+
+
+def test_deprecated_filter_selects_from_below_the_unfiltered_top_k():
+    tags = tuple(
+        TagEntry(f"a{index:04d}", 0, 10_000 - index, index < 40)
+        for index in range(80)
+    )
+    index = TagIndex(Artifact.from_tagset(TagSet(threshold=0, tags=tags, aliases=(), alias_target=())))
+    hits = index.search("a", limit=3)
+    assert [hit.name for hit in hits] == ["a0040", "a0041", "a0042"]
+
+
+def test_name_length_is_the_byte_length_not_the_character_length():
+    tags = (TagEntry("蓝发", 0, 5, False), TagEntry("髪", 0, 3, False))
+    index = TagIndex(Artifact.from_tagset(TagSet(threshold=0, tags=tags, aliases=(), alias_target=())))
+    hits = index.search("蓝")
+    assert hits[0].name_length == 6
+    assert hits[0].name == "蓝发"
+
+
+def test_custom_entries_still_replace_main_entries_under_bounded_selection():
+    main = Artifact.from_tagset(TagSet(
+        threshold=0,
+        tags=tuple(TagEntry(f"b{index:04d}", 0, 100 - index, False) for index in range(50)),
+        aliases=(),
+        alias_target=(),
+    ))
+    custom = Artifact.from_tagset(TagSet(
+        threshold=0,
+        tags=(TagEntry("b0000", 4, 999_999, False),),
+        aliases=(),
+        alias_target=(),
+    ))
+    hits = TagIndex(main, custom=custom).search("b", limit=1)
+    assert [(hit.name, hit.category, hit.post_count) for hit in hits] == [("b0000", 4, 999_999)]
+
+
+def test_custom_override_keeps_a_deeper_main_candidate_when_it_ranks_lower():
+    main = Artifact.from_tagset(TagSet(
+        threshold=0,
+        tags=(
+            TagEntry("c0000", 0, 100, False),
+            TagEntry("c0001", 0, 90, False),
+            TagEntry("c0002", 0, 80, False),
+        ),
+        aliases=(),
+        alias_target=(),
+    ))
+    custom = Artifact.from_tagset(TagSet(
+        threshold=0,
+        tags=(TagEntry("c0000", 4, 0, False),),
+        aliases=(),
+        alias_target=(),
+    ))
+    hits = TagIndex(main, custom=custom).search("c", limit=2)
+    assert [hit.name for hit in hits] == ["c0001", "c0002"]

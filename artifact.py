@@ -7,12 +7,13 @@ Keep it free of ComfyUI imports so the build pipeline can run standalone.
 from __future__ import annotations
 
 import csv
+import heapq
 import io
 import json
 import sys
 import struct
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Iterator
 
 MAGIC = b"DTA1"
 FORMAT_VERSION = 1
@@ -342,16 +343,18 @@ class SearchHit:
     deprecated: bool
     alias: str | None
     rank: int
+    name_length: int
 
 
 def _hit_sort_key(hit: SearchHit) -> tuple[int, int, int, str]:
-    name_length = len(hit.name.encode("utf-8")) if hit.rank == RANK_NAME_PREFIX else 0
-    return (hit.rank, name_length, -hit.post_count, hit.name)
+    return (hit.rank, hit.name_length if hit.rank == RANK_NAME_PREFIX else 0, -hit.post_count, hit.name)
 
 
 class TagIndex:
     """Search over a main artifact with an optional custom overlay.
 
+    Results are exact. Selection is bounded: the name side keeps only the best
+    `limit` candidates while scanning, and only those are decoded into SearchHits.
     Custom entries win over main entries with the same canonical name.
     """
 
@@ -361,29 +364,30 @@ class TagIndex:
         self._main = main
         self._custom = custom
 
-    def _collect(self, source: Artifact, key_bytes: bytes) -> list[SearchHit]:
-        hits: list[SearchHit] = []
+    def _name_candidates(
+        self,
+        source: Artifact,
+        key_bytes: bytes,
+        categories: frozenset[int] | None,
+        exclude_deprecated: bool,
+    ) -> Iterator[tuple[int, int, int, int]]:
+        """Yield (rank, name_length, -post_count, index) for filtering name matches.
+
+        The index stands in for the name tie-break: a source's names are stored in
+        byte order, so index order and name order agree. Nothing is decoded here.
+        """
         for index in range(source.lower_bound_name(key_bytes), source.n_tags):
             name_bytes = source.name_bytes(index)
             if not name_bytes.startswith(key_bytes):
                 break
+            if exclude_deprecated and source.deprecated(index):
+                continue
+            if categories is not None and source.category(index) not in categories:
+                continue
             rank = RANK_EXACT if name_bytes == key_bytes else RANK_NAME_PREFIX
-            hits.append(SearchHit(
-                source.name(index), source.category(index), source.post_count(index),
-                source.deprecated(index), None, rank,
-            ))
-        for index in range(source.lower_bound_alias(key_bytes), source.n_aliases):
-            alias_bytes = source.alias_bytes(index)
-            if not alias_bytes.startswith(key_bytes):
-                break
-            target = source.alias_target(index)
-            hits.append(SearchHit(
-                source.name(target), source.category(target), source.post_count(target),
-                source.deprecated(target), source.alias(index), RANK_ALIAS_PREFIX,
-            ))
-        return hits
+            yield (rank, len(name_bytes), -source.post_count(index), index)
 
-    def _search_source(
+    def _alias_hits(
         self,
         source: Artifact,
         key_bytes: bytes,
@@ -391,15 +395,50 @@ class TagIndex:
         exclude_deprecated: bool,
     ) -> dict[str, SearchHit]:
         best: dict[str, SearchHit] = {}
-        for hit in self._collect(source, key_bytes):
-            if exclude_deprecated and hit.deprecated:
+        for index in range(source.lower_bound_alias(key_bytes), source.n_aliases):
+            alias_bytes = source.alias_bytes(index)
+            if not alias_bytes.startswith(key_bytes):
+                break
+            target = source.alias_target(index)
+            if exclude_deprecated and source.deprecated(target):
                 continue
-            if categories is not None and hit.category not in categories:
+            category = source.category(target)
+            if categories is not None and category not in categories:
                 continue
+            name_bytes = source.name_bytes(target)
+            hit = SearchHit(
+                name_bytes.decode("utf-8"), category, source.post_count(target),
+                source.deprecated(target), alias_bytes.decode("utf-8"),
+                RANK_ALIAS_PREFIX, len(name_bytes),
+            )
             current = best.get(hit.name)
             if current is None or _hit_sort_key(hit) < _hit_sort_key(current):
                 best[hit.name] = hit
         return best
+
+    def _search_source(
+        self,
+        source: Artifact,
+        key_bytes: bytes,
+        limit: int,
+        categories: frozenset[int] | None,
+        exclude_deprecated: bool,
+    ) -> dict[str, SearchHit]:
+        combined: dict[str, SearchHit] = {}
+        selected = heapq.nsmallest(
+            limit, self._name_candidates(source, key_bytes, categories, exclude_deprecated)
+        )
+        for rank, name_length, _negative_count, index in selected:
+            name = source.name(index)
+            combined[name] = SearchHit(
+                name, source.category(index), source.post_count(index),
+                source.deprecated(index), None, rank, name_length,
+            )
+        for name, hit in self._alias_hits(source, key_bytes, categories, exclude_deprecated).items():
+            current = combined.get(name)
+            if current is None or _hit_sort_key(hit) < _hit_sort_key(current):
+                combined[name] = hit
+        return {hit.name: hit for hit in heapq.nsmallest(limit, combined.values(), key=_hit_sort_key)}
 
     def search(
         self,
@@ -408,14 +447,25 @@ class TagIndex:
         categories: frozenset[int] | None = None,
         exclude_deprecated: bool = True,
     ) -> list[SearchHit]:
-        """Search the main artifact, then let custom entries replace main entries by name."""
+        """Return the best `limit` matches for `query`, ranked exactly."""
         key = normalize_tag(query)
         if not key:
             return []
         key_bytes = key.encode("utf-8")
-        merged = self._search_source(self._main, key_bytes, categories, exclude_deprecated)
-        if self._custom is not None:
-            merged.update(self._search_source(self._custom, key_bytes, categories, exclude_deprecated))
+        if self._custom is None:
+            merged = self._search_source(self._main, key_bytes, limit, categories, exclude_deprecated)
+        else:
+            # The overlay wins by name even when it ranks lower than the main entry it
+            # replaces, so over-select main by the number of overlay names to keep the
+            # bounded window exact.
+            custom = self._search_source(
+                self._custom, key_bytes, self._custom.n_tags + self._custom.n_aliases,
+                categories, exclude_deprecated,
+            )
+            merged = self._search_source(
+                self._main, key_bytes, limit + len(custom), categories, exclude_deprecated
+            )
+            merged.update(custom)
         return sorted(merged.values(), key=_hit_sort_key)[:limit]
 
 

@@ -323,6 +323,8 @@ main 인덱스의 이름/alias 배열과 custom 오버레이의 이름/alias 배
 - custom과 main에 같은 이름이 있으면 custom 항목만 남긴다(custom 우선).
 - 결과에서 canonical 이름 기준으로 중복을 제거한다.
 
+선택은 bounded top-k로 수행한다. 이름 후보는 필터를 통과한 뒤 (rank, 이름 byte 길이, -post_count, index) 튜플로 비교하고 heapq.nsmallest로 상위 limit만 남긴 뒤 디코드한다. 카테고리와 deprecated 필터는 선택 이전에 적용하므로 필터가 슬롯을 소모하지 않는다. 결과는 근사가 아니라 정확하다. custom 오버레이는 이름 기준으로 main을 대체하며 대체된 항목이 main보다 낮게 정렬될 수 있으므로, 정확도를 유지하기 위해 main 후보를 오버레이 이름 수만큼 더 선택한다.
+
 ### 8.3 deprecated / alias 상태 표시
 
 - `exclude_deprecated`가 참이면 deprecated 태그는 결과에서 제외한다.
@@ -537,7 +539,7 @@ pytest:
 | `test_build.py` | merge 우선순위(HDiffusion > hlibr), alias chain/cycle, alias-only 포함, threshold, category/bad row 실패 |
 | `test_validate.py` | §11.3의 각 규칙이 위조 아티팩트에서 실제로 실패하는지 |
 | `test_custom.py` | CSV/JSON custom 파싱, main과의 이름 충돌 시 custom 우선, 형식 오류 처리 |
-| `test_benchmark.py` | 합성 1,710,000 태그 아티팩트로 decode 시간과 1,000회 질의 p95를 측정/기록. CI에서 질의 p95 < 50ms를 단언 |
+| `test_benchmark.py` | 합성 1,710,000 태그로 decode와 긴 prefix 질의 p95, 그리고 shipped 프로필 규모(1,709,994)의 1글자·2글자 prefix p95를 측정한다. `generated/tags.bin.gz`가 있으면 실제 아티팩트에 대해서도 같은 게이트를 실행한다 |
 
 프론트엔드 수동 체크리스트(README에 기재):
 

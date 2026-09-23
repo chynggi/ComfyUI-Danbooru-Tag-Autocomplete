@@ -8,7 +8,8 @@
         "postCount": 1200,
         "deprecated": false,
         "alias": null,
-        "rank": 1
+        "rank": 1,
+        "nameLength": 9
       },
       {
         "name": "blue_hairband",
@@ -16,7 +17,8 @@
         "postCount": 82,
         "deprecated": false,
         "alias": null,
-        "rank": 1
+        "rank": 1,
+        "nameLength": 13
       },
       {
         "name": "blue_hair_ornament",
@@ -24,7 +26,8 @@
         "postCount": 30,
         "deprecated": false,
         "alias": null,
-        "rank": 1
+        "rank": 1,
+        "nameLength": 18
       }
     ],
     "blue_hair": [
@@ -34,7 +37,8 @@
         "postCount": 1200,
         "deprecated": false,
         "alias": null,
-        "rank": 0
+        "rank": 0,
+        "nameLength": 9
       },
       {
         "name": "blue_hairband",
@@ -42,7 +46,8 @@
         "postCount": 82,
         "deprecated": false,
         "alias": null,
-        "rank": 1
+        "rank": 1,
+        "nameLength": 13
       },
       {
         "name": "blue_hair_ornament",
@@ -50,7 +55,8 @@
         "postCount": 30,
         "deprecated": false,
         "alias": null,
-        "rank": 1
+        "rank": 1,
+        "nameLength": 18
       }
     ],
     "blu_h": [
@@ -60,7 +66,8 @@
         "postCount": 1200,
         "deprecated": false,
         "alias": "blu_hair",
-        "rank": 2
+        "rank": 2,
+        "nameLength": 9
       }
     ],
     "miku": [
@@ -70,7 +77,8 @@
         "postCount": 900,
         "deprecated": false,
         "alias": "miku",
-        "rank": 2
+        "rank": 2,
+        "nameLength": 12
       }
     ],
     "old_tag": [],
@@ -81,7 +89,8 @@
         "postCount": 700,
         "deprecated": false,
         "alias": null,
-        "rank": 1
+        "rank": 1,
+        "nameLength": 7
       }
     ],
     "zzz": [],
