@@ -214,19 +214,34 @@ and immediately after the validation block's `return 1` (so the pointer is writt
 Run: `.venv/bin/python -m pytest tests/test_build.py -q`
 Expected: PASS (23 tests, 20 existing + 3 new)
 
-- [ ] **Step 5: Verify the committed pointer is exactly what the build produces**
+- [ ] **Step 5: Prove the pointer is a deterministic function of the build**
 
-Run:
+Two things are true, and only the second is stable, because upstream publishes a new data day daily.
+The committed pointer names an older build than today's upstream, and the same build always produces
+the same bytes. Check the stable one:
 
 ```bash
-.venv/bin/python build/build_database.py --profile profiles/danbooru.yaml --out generated \
-  --latest-json data/latest.json --repo-slug chynggi/ComfyUI-Danbooru-Tag-Autocomplete
-git diff --exit-code -- data/latest.json && echo "UNCHANGED: the committed pointer matches the build"
+.venv/bin/python build/build_database.py --profile profiles/danbooru.yaml --out /tmp/dta-a \
+  --latest-json /tmp/dta-a/latest.json --repo-slug chynggi/ComfyUI-Danbooru-Tag-Autocomplete
+.venv/bin/python build/build_database.py --profile profiles/danbooru.yaml --out /tmp/dta-b \
+  --latest-json /tmp/dta-b/latest.json --repo-slug chynggi/ComfyUI-Danbooru-Tag-Autocomplete
+cmp /tmp/dta-a/latest.json /tmp/dta-b/latest.json && echo "IDENTICAL: the pointer is deterministic"
 ```
 
-Expected: the build prints `data_version=2026.09.22 sha256=d48a2b1b…`, then
-`UNCHANGED: the committed pointer matches the build`. This also demonstrates the exact predicate the
-workflow will use, and that this repository's next data build has nothing new to publish.
+Expected: `IDENTICAL: the pointer is deterministic`. That byte-identity is exactly what Task 2's
+`git diff` detection depends on; without it the workflow would publish on every run.
+
+Then note the committed pointer's state without touching it:
+
+```bash
+diff data/latest.json /tmp/dta-a/latest.json || true
+```
+
+Expected: a diff. Upstream has moved on since M1 committed the pointer — at the time of writing the
+build produces `data_version=2026.09.23` while the committed file names `2026.09.22`, so the release
+URL in the build's output is `…/data-2026.09.23/tags.bin.gz`. **Do not update `data/latest.json` by
+hand.** Publishing the new release and committing the refreshed pointer together is the workflow's
+job, and doing it manually would leave the two describing different artifacts.
 
 - [ ] **Step 6: Commit**
 
@@ -380,10 +395,18 @@ repository root, reusing the existing `data/raw` cache:
 git diff --quiet -- data/latest.json && echo "changed=false" || echo "changed=true"
 ```
 
-Expected: the fetch reports both source revisions, the build prints `data_version=2026.09.22` and the
-same `sha256`, validate prints `validation passed`, the suite is `158 passed` with the three
-`p95=` lines visible, and the last line prints `changed=false` because the committed pointer already
-matches. Record those three p95 numbers; they are the local baseline for Task 4.
+Expected: the fetch reports both source revisions, the build prints a `data_version` and `sha256`,
+validate prints `validation passed`, the suite is `161 passed` with the three `p95=` lines visible,
+and the last line prints `changed=true`. It is genuinely `true` right now: upstream has published a
+newer data day than M1 committed, so there is something to publish, which is exactly the case the
+workflow exists for. Record those three p95 numbers — they are the local baseline for Task 4 — and
+note the `data_version` the build produced, because that names the release Task 4 will look for.
+
+Restore the pointer before committing, if the build rewrote it:
+
+```bash
+git checkout -- data/latest.json
+```
 
 Note the one value this cannot check locally: `$GITHUB_REPOSITORY` resolves to this repository only
 on the runner. Passing the same slug by hand is what makes the local run faithful.
@@ -653,14 +676,19 @@ The second row is carried item I4. Its local figure is 39.79 ms (1-char) and 0.0
 
 - [ ] **Step 4: Verify the published release**
 
+Read the tag out of the pointer the run committed, rather than assuming a version:
+
 ```bash
-gh release view data-2026.09.22
-gh release view data-2026.09.22 --json assets -q '.assets[].name'
-gh release view data-2026.09.22 --json isLatest,isPrerelease -q '"latest=\(.isLatest) prerelease=\(.isPrerelease)"'
+TAG=$(python -c "import json; print('data-' + json.load(open('data/latest.json'))['data_version'])")
+echo "$TAG"
+gh release view "$TAG"
+gh release view "$TAG" --json assets -q '.assets[].name'
+gh release view "$TAG" --json isLatest,isPrerelease -q '"latest=\(.isLatest) prerelease=\(.isPrerelease)"'
 ```
 
-Expected: both `tags.bin.gz` and `metadata.json` present, and **`latest=false`**, because a data
-release must never become the repository's latest release.
+Expected: the tag matches the `data_version` the run built, both `tags.bin.gz` and `metadata.json` are
+present, and **`latest=false`**, because a data release must never become the repository's latest
+release.
 
 - [ ] **Step 5: Verify the live download path end to end**
 
@@ -708,8 +736,8 @@ print("search('blue_h') ->", [hit.name for hit in index.search("blue_h", limit=3
 PY
 ```
 
-Expected: `state before download: missing`, then `ready` with `data_version=2026.09.22`, identical
-hashes, and `search('blue_h')` returning real tags. This is the first time the production download
+Expected: `state before download: missing`, then `ready` with the `data_version` the pointer names,
+identical hashes, and `search('blue_h')` returning real tags. This is the first time the production download
 path is exercised at all; M1 through M2b used `DTA_LOCAL_ARTIFACT`.
 
 - [ ] **Step 6: Record the numbers in this plan and commit**
@@ -730,9 +758,10 @@ git push origin main
 - `.venv/bin/python -m pytest -q` passes (158 tests, plus the three new ones from Task 1 → 161).
 - `.github/workflows/update-data.yml` exists, parses, and its steps run in the order fetch → build →
   validate → test → decide → publish → commit.
-- A manual dispatch of the workflow succeeds and publishes `data-2026.09.22` with both assets and
-  `latest=false`.
-- The repository's `data/latest.json` names that release and matches its artifact's `sha256`.
+- A manual dispatch of the workflow succeeds and publishes the `data-<data_version>` release the
+  build produced, with both assets and `latest=false`.
+- The repository's `data/latest.json` was refreshed by the run, names that release, and matches its
+  artifact's `sha256` — which means the pointer changed from `2026.09.22` to the newer data day.
 - The live download path works with no `DTA_*` overrides: the pointer URL resolves, the artifact
   verifies against the pointer's hash, and a search over it returns real tags.
 - The CI latency figures are recorded in this plan, including the distributed one-character gate
