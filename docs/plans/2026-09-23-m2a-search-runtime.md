@@ -1471,6 +1471,53 @@ def test_custom_payload_reports_a_broken_custom_file(store, tmp_path, monkeypatc
     assert payload["available"] is False
     assert payload["warnings"]
     assert [hit.name for hit in store.load_index().search("blue_h")] == ["blue_hair"]
+
+
+def test_status_ignores_a_non_object_metadata_file(store, tmp_path, monkeypatch):
+    monkeypatch.setenv("DTA_LOCAL_ARTIFACT", str(build_artifact(tmp_path / "generated")))
+    store.metadata_path().write_text("[1, 2, 3]", encoding="utf-8")
+
+    status = store.status()
+
+    assert status.state == store.STATE_READY
+    assert status.data_version is None
+
+
+def test_download_rejects_a_pointer_without_a_sha256(store, tmp_path, http_files, monkeypatch):
+    root, base_url = http_files
+    build_artifact(root)
+    (root / "latest.json").write_text(
+        json.dumps({"url": f"{base_url}/tags.bin.gz"}), encoding="utf-8"
+    )
+    monkeypatch.setenv("DTA_LATEST_URL", f"{base_url}/latest.json")
+
+    store.ensure_download()
+    status = wait_for_state(store, store.STATE_ERROR)
+
+    assert status.error
+    assert not store.artifact_path().exists()
+
+
+def test_download_reports_a_non_object_pointer(store, http_files, monkeypatch):
+    root, base_url = http_files
+    (root / "latest.json").write_text("[1, 2, 3]", encoding="utf-8")
+    monkeypatch.setenv("DTA_LATEST_URL", f"{base_url}/latest.json")
+
+    store.ensure_download()
+    status = wait_for_state(store, store.STATE_ERROR)
+
+    assert status.error
+
+
+def test_custom_payload_survives_an_oversized_csv_field(store, tmp_path, monkeypatch):
+    monkeypatch.setenv("DTA_LOCAL_ARTIFACT", str(build_artifact(tmp_path / "generated")))
+    (store.cache_dir() / "custom_tags.csv").write_text("a" * 200_000 + ",0,1,\n", encoding="utf-8")
+
+    payload = store.custom_payload()
+
+    assert payload["available"] is False
+    assert payload["warnings"]
+    assert store.load_index().search("blue_h")[0].name == "blue_hair"
 ```
 
 - [ ] **Step 4: Run the tests to verify they fail**
@@ -1495,6 +1542,7 @@ release exists.
 from __future__ import annotations
 
 import base64
+import csv
 import gzip
 import hashlib
 import json
@@ -1591,9 +1639,12 @@ def _data_version() -> str | None:
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8")).get("data_version")
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if not isinstance(payload, dict):
+        return None
+    return payload.get("data_version")
 
 
 def status() -> Status:
@@ -1625,8 +1676,14 @@ def ensure_download() -> None:
             return
         _state = STATE_DOWNLOADING
         _error = None
-        _download_thread = threading.Thread(target=_download, name="dta-download", daemon=True)
-        _download_thread.start()
+        thread = threading.Thread(target=_download, name="dta-download", daemon=True)
+        try:
+            thread.start()
+        except RuntimeError as exc:
+            _state = STATE_ERROR
+            _error = f"could not start the download thread: {exc}"
+            return
+        _download_thread = thread
 
 
 def _write_atomic(path: Path, payload: bytes) -> None:
@@ -1647,9 +1704,9 @@ def _download() -> None:
         artifact_response.raise_for_status()
         payload = artifact_response.content
 
-        expected = pointer.get("sha256")
+        expected = pointer["sha256"]
         digest = hashlib.sha256(payload).hexdigest()
-        if expected and digest != expected:
+        if digest != expected:
             raise ValueError(f"artifact sha256 mismatch (expected {expected}, got {digest})")
 
         metadata_response = requests.get(
@@ -1660,11 +1717,11 @@ def _download() -> None:
 
         _write_atomic(artifact_path(), payload)
         _write_atomic(metadata_path(), metadata_response.content)
-    except (requests.RequestException, OSError, ValueError, KeyError) as exc:
+    except Exception as exc:  # the worker must always reach a terminal state
         log.warning("danbooru-tag-autocomplete: artifact download failed: %s", exc)
         with _lock:
             _state = STATE_ERROR
-            _error = str(exc)
+            _error = f"{type(exc).__name__}: {exc}"
         return
     with _lock:
         _state = STATE_READY
@@ -1703,7 +1760,7 @@ def load_custom() -> tuple[Artifact | None, tuple[str, ...]]:
         return _custom_cache[1]
     try:
         result = build_custom_overlay(load_artifact(), path.read_text(encoding="utf-8"), path.name)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, TypeError, csv.Error) as exc:
         log.warning("danbooru-tag-autocomplete: %s could not be used: %s", path.name, exc)
         result = (None, (f"{path.name}: {exc}",))
     _custom_cache = (identity, result)
@@ -1736,7 +1793,7 @@ def custom_payload() -> dict:
 - [ ] **Step 6: Run the store tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_store.py -v`
-Expected: PASS (10 passed)
+Expected: PASS (15 passed)
 
 - [ ] **Step 7: Run the full suite and commit**
 
