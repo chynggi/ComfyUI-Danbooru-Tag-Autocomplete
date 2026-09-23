@@ -12,6 +12,7 @@ release exists.
 from __future__ import annotations
 
 import base64
+import csv
 import gzip
 import hashlib
 import json
@@ -108,9 +109,12 @@ def _data_version() -> str | None:
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8")).get("data_version")
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if not isinstance(payload, dict):
+        return None
+    return payload.get("data_version")
 
 
 def status() -> Status:
@@ -142,8 +146,14 @@ def ensure_download() -> None:
             return
         _state = STATE_DOWNLOADING
         _error = None
-        _download_thread = threading.Thread(target=_download, name="dta-download", daemon=True)
-        _download_thread.start()
+        thread = threading.Thread(target=_download, name="dta-download", daemon=True)
+        try:
+            thread.start()
+        except RuntimeError as exc:
+            _state = STATE_ERROR
+            _error = f"could not start the download thread: {exc}"
+            return
+        _download_thread = thread
 
 
 def _write_atomic(path: Path, payload: bytes) -> None:
@@ -164,9 +174,9 @@ def _download() -> None:
         artifact_response.raise_for_status()
         payload = artifact_response.content
 
-        expected = pointer.get("sha256")
+        expected = pointer["sha256"]
         digest = hashlib.sha256(payload).hexdigest()
-        if expected and digest != expected:
+        if digest != expected:
             raise ValueError(f"artifact sha256 mismatch (expected {expected}, got {digest})")
 
         metadata_response = requests.get(
@@ -177,11 +187,11 @@ def _download() -> None:
 
         _write_atomic(artifact_path(), payload)
         _write_atomic(metadata_path(), metadata_response.content)
-    except (requests.RequestException, OSError, ValueError, KeyError) as exc:
+    except Exception as exc:  # the worker must always reach a terminal state
         log.warning("danbooru-tag-autocomplete: artifact download failed: %s", exc)
         with _lock:
             _state = STATE_ERROR
-            _error = str(exc)
+            _error = f"{type(exc).__name__}: {exc}"
         return
     with _lock:
         _state = STATE_READY
@@ -220,7 +230,7 @@ def load_custom() -> tuple[Artifact | None, tuple[str, ...]]:
         return _custom_cache[1]
     try:
         result = build_custom_overlay(load_artifact(), path.read_text(encoding="utf-8"), path.name)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, TypeError, csv.Error) as exc:
         log.warning("danbooru-tag-autocomplete: %s could not be used: %s", path.name, exc)
         result = (None, (f"{path.name}: {exc}",))
     _custom_cache = (identity, result)

@@ -221,3 +221,71 @@ def test_custom_payload_reports_a_broken_custom_file(store, tmp_path, monkeypatc
     assert payload["available"] is False
     assert payload["warnings"]
     assert [hit.name for hit in store.load_index().search("blue_h")] == ["blue_hair"]
+
+
+def test_status_ignores_a_non_object_metadata_file(store, tmp_path, monkeypatch):
+    monkeypatch.setenv("DTA_LOCAL_ARTIFACT", str(build_artifact(tmp_path / "generated")))
+    store.metadata_path().write_text("[1, 2, 3]", encoding="utf-8")
+
+    status = store.status()
+
+    assert status.state == store.STATE_READY
+    assert status.data_version is None
+
+
+def test_download_rejects_a_pointer_without_a_sha256(store, tmp_path, http_files, monkeypatch):
+    root, base_url = http_files
+    build_artifact(root)
+    (root / "latest.json").write_text(
+        json.dumps({"url": f"{base_url}/tags.bin.gz"}), encoding="utf-8"
+    )
+    monkeypatch.setenv("DTA_LATEST_URL", f"{base_url}/latest.json")
+
+    store.ensure_download()
+    status = wait_for_state(store, store.STATE_ERROR)
+
+    assert status.error
+    assert not store.artifact_path().exists()
+
+
+def test_download_reports_a_non_object_pointer(store, http_files, monkeypatch):
+    root, base_url = http_files
+    (root / "latest.json").write_text("[1, 2, 3]", encoding="utf-8")
+    monkeypatch.setenv("DTA_LATEST_URL", f"{base_url}/latest.json")
+
+    store.ensure_download()
+    status = wait_for_state(store, store.STATE_ERROR)
+
+    assert status.error
+
+
+def test_custom_payload_survives_an_oversized_csv_field(store, tmp_path, monkeypatch):
+    monkeypatch.setenv("DTA_LOCAL_ARTIFACT", str(build_artifact(tmp_path / "generated")))
+    (store.cache_dir() / "custom_tags.csv").write_text("a" * 200_000 + ",0,1,\n", encoding="utf-8")
+
+    payload = store.custom_payload()
+
+    assert payload["available"] is False
+    assert payload["warnings"]
+    assert store.load_index().search("blue_h")[0].name == "blue_hair"
+
+
+def test_download_records_an_error_when_the_thread_cannot_start(store, monkeypatch):
+    class BrokenThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+        def is_alive(self):
+            return False
+
+    monkeypatch.setattr(store.threading, "Thread", BrokenThread)
+
+    store.ensure_download()
+
+    status = store.status()
+    assert status.state == store.STATE_ERROR
+    assert "could not start the download thread" in status.error
+    assert store._download_thread is None
