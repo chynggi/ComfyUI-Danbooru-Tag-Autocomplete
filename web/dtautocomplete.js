@@ -219,7 +219,14 @@ function attach(widget) {
 
   textarea.addEventListener("input", refresh);
   textarea.addEventListener("click", refresh);
-  textarea.addEventListener("blur", () => setTimeout(() => dropdown.hide(), 150));
+  let blurTimer = null;
+  textarea.addEventListener("blur", () => {
+    blurTimer = setTimeout(() => dropdown.hide(), 150);
+  });
+  textarea.addEventListener("focus", () => {
+    clearTimeout(blurTimer);
+    blurTimer = null;
+  });
   textarea.addEventListener("keydown", (event) => {
     if (dropdown.handleKey(event, settings())) {
       event.preventDefault();
@@ -229,6 +236,9 @@ function attach(widget) {
 }
 
 function observeTextareas() {
+  for (const textarea of document.querySelectorAll("textarea.comfy-multiline-input")) {
+    attach({ element: textarea });
+  }
   const observer = new MutationObserver((records) => {
     for (const record of records) {
       for (const node of record.addedNodes) {
@@ -279,9 +289,12 @@ app.registerExtension({
         console.info(`[${EXTENSION_NAME}] another autocomplete extension is active; staying off`);
         return;
       }
+      // Arm the observer before waiting on the database. A prompt field that appears while the
+      // download is still running would otherwise never be attached, because the observer only
+      // sees nodes added after it starts. Suggestions stay off until `ready`, so this is safe.
+      observeTextareas();
       index = await loadIndex();
       ready = true;
-      observeTextareas();
     } catch (error) {
       // The spec separates the two cases. A database that is missing, errored or not downloaded
       // in time is something the user can act on, so it gets a visible explanation. Any other
