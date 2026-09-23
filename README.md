@@ -26,7 +26,7 @@ In ComfyUI's settings, under the `DanbooruTagAutocomplete` group:
 | Setting | Default | What it does |
 |---|---|---|
 | `Enable tag autocomplete` | on | turns the suggestions off entirely |
-| `Suggestion count` | 32 | how many rows the list shows |
+| `Suggestion count` | 32 | how many suggestions the list offers; about ten are visible at once |
 | `Insert with Tab` | on | accept the highlighted tag with `Tab` |
 | `Insert with Enter` | off | accept with `Enter` instead; off leaves `Enter` as a newline |
 | `Insert spaces instead of underscores` | off | writes `blue hair` rather than `blue_hair` |
@@ -38,8 +38,10 @@ In ComfyUI's settings, under the `DanbooruTagAutocomplete` group:
 
 `data/latest.json` in this repository names the current release and its `sha256`. The extension
 reads that pointer, downloads `tags.bin.gz` from the release it names, verifies the hash, and caches
-it. Updating the tags therefore needs no code update: a scheduled workflow rebuilds from upstream
-every day at 03:00 KST and publishes a new `data-<version>` release only when something changed.
+it. A scheduled workflow rebuilds from upstream every day at 03:00 KST, publishes a new
+`data-<version>` release only when the data changed, and commits the matching `data/latest.json` back
+to the repository. The extension learns of new data through that committed pointer, so updating the
+tags never needs a code update.
 
 The sources are `hlibr/danbooru-tag-metadata-snapshot` for the tag set, categories and aliases, and
 `HDiffusion/historical-danbooru-tag-counts` for daily post counts. Both are recorded with their
@@ -57,9 +59,9 @@ exclude_deprecated: true # drop deprecated tags but keep their aliases
 extra_sources: []        # source ids merged on top of the defaults
 ```
 
-`danbooru` is the default, and it covers the Danbooru tag set that Illustrious, NoobAI, Pony and WAI
-models are trained on, so no model-specific profile ships: without model tag lists of its own, such
-a file would only repeat the defaults. To build a narrower one — a higher threshold, or without
+`danbooru` is the default. Illustrious, NoobAI, Pony and WAI prompts are written in the Danbooru tag
+vocabulary, so one profile covers them; a model-specific profile would only repeat the defaults unless
+it brought a tag source of its own. To build a narrower one — a higher threshold, or without
 meta tags — copy `profiles/danbooru.yaml`, edit it, and build with `--profile profiles/<name>.yaml`.
 `extra_sources` is the extension point for other boorus; a new source is a class under
 `build/sources/` registered in `build/fetch_upstream.py`.
@@ -98,9 +100,9 @@ before it tests.
 
 | Variable | Effect |
 |---|---|
-| `DTA_LOCAL_ARTIFACT` | use this `tags.bin.gz` instead of downloading |
+| `DTA_LOCAL_ARTIFACT` | use this `tags.bin.gz`, with its `metadata.json` beside it, instead of downloading |
 | `DTA_LATEST_URL` | read the pointer from this URL instead of the repository |
-| `DTA_REPO_SLUG` | override the repository slug used for release URLs |
+| `DTA_REPO_SLUG` | override the repository whose committed pointer is read |
 
 ## Browser checklist
 
@@ -142,4 +144,21 @@ The browser behaviour is verified by hand, as the design specifies. Run ComfyUI,
 
 ## Licence
 
-MIT. The upstream dataset licences are recorded in each release's `metadata.json`.
+MIT.
+
+The tag data is built from two upstream datasets. Each release's `metadata.json` records every source
+it used, with that source's revision and data date.
+
+| Source | Licence | Note |
+|---|---|---|
+| `hlibr/danbooru-tag-metadata-snapshot` | MIT | generated from the Danbooru API |
+| `HDiffusion/historical-danbooru-tag-counts` | **unclear** | no LICENSE file; its dataset card carries only an `apache-2.0` tag |
+
+Treat the second as a risk. If it disappears or is withdrawn, drop it from `SOURCE_ORDER` in
+`build/fetch_upstream.py` and the build runs on `hlibr` alone, with the artifact carrying one source
+fewer. There is no environment override for the source repositories, so that is a code change rather
+than a config change.
+
+The raw datasets are never redistributed: a release carries only the built artifact, and the
+downloaded raw files stay in a gitignored cache. The Danbooru tag vocabulary itself is treated as
+factual information rather than copyrighted content, and no wiki text is used.
