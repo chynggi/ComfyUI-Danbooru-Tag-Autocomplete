@@ -57,13 +57,22 @@ M2a is complete and merged: `web/search.js`, the `/danbooru-tag-autocomplete/*` 
   - `planInsertion(text: string, caret: number, replacement: string, options?: { replaceUnderscores?: boolean }) -> { start: number, end: number, replacement: string, text: string, caret: number }` — `replacement` is the string to insert, including any `", "` suffix; `text` and `caret` are the whole updated value and the caret position after it
 
 **Semantics.** The token under the caret is the whole separator-delimited run containing it,
-because a Danbooru tag may contain spaces (`blue hair` normalizes to `blue_hair`). Trailing
-whitespace is trimmed from the end of the range so `"1girl, blue_h , x"` keeps its space
-before the comma, and the caret is never moved backwards past where the token ends.
+because a Danbooru tag may contain spaces (`blue hair` normalizes to `blue_hair`), so
+`tokenRange` must agree with `extractToken` in `web/search.js` about where a token begins and
+ends. Whitespace immediately after a separator is **not** part of the token, so it survives the
+replacement: `"1girl, blue_h"` yields the range `[7, 13)`, keeping the space after the comma.
+Trailing whitespace is trimmed from the end of the range, so `"1girl, blue_h , x"` keeps its
+space before the comma.
+
+Accepting therefore replaces the entire run containing the caret, which is what A1111's
+tagcomplete does. A caret in the middle of a run replaces that whole run — the common case is a
+caret at the end of what the user just typed, and a malformed run like `"1girl, blue_h x"` is
+replaced as one token rather than partially.
 
 A `", "` suffix is appended unless the character after the range is already a separator or
-whitespace, so `"1girl, blue_h"` becomes `"1girl, blue_hair, "` while `"1girl, blue_h, x"`
-becomes `"1girl, blue_hair, x"` with its existing comma untouched.
+whitespace, so `"1girl, blue_h"` becomes `"1girl, blue_hair, "`, `"1girl, blue_h, x"` becomes
+`"1girl, blue_hair, x"` with its existing comma untouched, and an empty field becomes
+`"1girl, "` rather than `"1girl"`.
 
 The range and the inserted string are returned alongside the whole updated value so the
 caller can either assign `text` or select `[start, end)` and insert `replacement`, which is
@@ -134,9 +143,9 @@ test("planInsertion replaces a token in the middle of the text", () => {
   assert.deepEqual(planInsertion("blue_hair, 1girl", 4, "blue"), {
     start: 0,
     end: 9,
-    replacement: "blue, ",
+    replacement: "blue",
     text: "blue, 1girl",
-    caret: 6,
+    caret: 4,
   });
 });
 
@@ -160,14 +169,18 @@ test("planInsertion on an empty field produces a trailing separator and caret", 
   });
 });
 
-test("planInsertion does not double a separator before a space", () => {
+test("planInsertion replaces the whole run a caret sits inside", () => {
   assert.deepEqual(planInsertion("1girl, blue_h x", 13, "blue_hair"), {
     start: 7,
     end: 15,
-    replacement: "blue_hair",
-    text: "1girl, blue_hair x",
-    caret: 16,
+    replacement: "blue_hair, ",
+    text: "1girl, blue_hair, ",
+    caret: 17,
   });
+});
+
+test("planInsertion keeps a space that follows the range", () => {
+  assert.deepEqual(planInsertion("1girl, blue_h , x", 13, "blue_hair").text, "1girl, blue_hair , x");
 });
 
 test("planInsertion's own text and caret agree with splicing its replacement", () => {
@@ -212,6 +225,9 @@ export function tokenRange(text, caret) {
       break;
     }
   }
+  while (start < stop && WHITESPACE.test(text[start])) {
+    start += 1;
+  }
   let end = stop;
   while (end < text.length && !TOKEN_SEPARATORS.has(text[end])) {
     end += 1;
@@ -226,7 +242,7 @@ export function planInsertion(text, caret, replacement, { replaceUnderscores = f
   const { start, end } = tokenRange(text, caret);
   const inserted = replaceUnderscores ? replacement.replace(/_/g, " ") : replacement;
   const next = text[end];
-  const suffix = next === undefined || TOKEN_SEPARATORS.has(next) || WHITESPACE.test(next) ? "" : ", ";
+  const suffix = next !== undefined && (TOKEN_SEPARATORS.has(next) || WHITESPACE.test(next)) ? "" : ", ";
   const insertion = inserted + suffix;
   return {
     start,
@@ -241,7 +257,7 @@ export function planInsertion(text, caret, replacement, { replaceUnderscores = f
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `node --test tests/test_insert_js.mjs`
-Expected: PASS (12 tests)
+Expected: PASS (13 tests)
 
 - [ ] **Step 5: Commit**
 
