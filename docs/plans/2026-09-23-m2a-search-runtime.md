@@ -801,18 +801,40 @@ function startsWith(bytes, start, end, key) {
   return true;
 }
 
-function hitSortKey(hit) {
-  return [hit.rank, hit.rank === RANK_NAME_PREFIX ? hit.nameLength : 0, -hit.postCount, hit.name];
+function compareCodePoints(left, right) {
+  // Python compares str by code point, and UTF-8 byte order agrees with code-point order.
+  // JavaScript compares by UTF-16 code unit, which sorts astral characters before BMP
+  // characters above U+E000, so compare code points explicitly.
+  let leftIndex = 0;
+  let rightIndex = 0;
+  while (leftIndex < left.length && rightIndex < right.length) {
+    const leftPoint = left.codePointAt(leftIndex);
+    const rightPoint = right.codePointAt(rightIndex);
+    if (leftPoint !== rightPoint) {
+      return leftPoint < rightPoint ? -1 : 1;
+    }
+    leftIndex += leftPoint > 0xffff ? 2 : 1;
+    rightIndex += rightPoint > 0xffff ? 2 : 1;
+  }
+  if (leftIndex >= left.length && rightIndex >= right.length) {
+    return 0;
+  }
+  return leftIndex >= left.length ? -1 : 1;
 }
 
 function compareHits(left, right) {
-  const a = hitSortKey(left);
-  const b = hitSortKey(right);
-  for (let index = 0; index < a.length; index += 1) {
-    if (a[index] < b[index]) return -1;
-    if (a[index] > b[index]) return 1;
+  if (left.rank !== right.rank) {
+    return left.rank < right.rank ? -1 : 1;
   }
-  return 0;
+  const leftLength = left.rank === RANK_NAME_PREFIX ? left.nameLength : 0;
+  const rightLength = right.rank === RANK_NAME_PREFIX ? right.nameLength : 0;
+  if (leftLength !== rightLength) {
+    return leftLength < rightLength ? -1 : 1;
+  }
+  if (left.postCount !== right.postCount) {
+    return left.postCount > right.postCount ? -1 : 1;
+  }
+  return compareCodePoints(left.name, right.name);
 }
 
 export class TagIndex {
@@ -968,20 +990,29 @@ from artifact import TagEntry, TagIndex, TagSet, decode, encode  # noqa: E402
 
 TAGSET = TagSet(
     threshold=25,
-    tags=(
-        TagEntry("1girl", 0, 5000, False),
-        TagEntry("blue_hair", 0, 1200, False),
-        TagEntry("blue_hair_ornament", 0, 30, False),
-        TagEntry("blue_hairband", 0, 82, False),
-        TagEntry("hatsune_miku", 4, 900, False),
-        TagEntry("highres", 5, 700, False),
-        TagEntry("old_tag", 0, 10, True),
-    ),
+    tags=tuple(sorted(
+        (
+            TagEntry("1girl", 0, 5000, False),
+            TagEntry("blue_hair", 0, 1200, False),
+            TagEntry("blue_hair_ornament", 0, 30, False),
+            TagEntry("blue_hairband", 0, 82, False),
+            TagEntry("hatsune_miku", 4, 900, False),
+            TagEntry("highres", 5, 700, False),
+            TagEntry("old_tag", 0, 10, True),
+            # Two names that tie on rank, UTF-8 byte length and post_count, so the final
+            # name tie-break decides between them. JavaScript compares UTF-16 code units
+            # and would order them the other way round; see compareCodePoints in
+            # web/search.js.
+            TagEntry("x\ue000x", 0, 7, False),
+            TagEntry("x\U00010000", 0, 7, False),
+        ),
+        key=lambda entry: entry.name.encode("utf-8"),
+    )),
     aliases=("blu_hair", "miku", "oldtag"),
     alias_target=(1, 4, 4),
 )
 
-QUERIES = ["blue_h", "blue_hair", "blu_h", "miku", "old_tag", "high", "zzz", ""]
+QUERIES = ["blue_h", "blue_hair", "blu_h", "miku", "old_tag", "high", "x", "zzz", ""]
 
 # An overlay that replaces a main tag with an entry ranking below the one it displaces,
 # which is the case a bounded per-source window gets wrong if it is not over-selected.
@@ -1106,8 +1137,25 @@ function readBuffer(path) {
 const artifactBuffer = readBuffer(join(FIXTURES, "artifact.bin"));
 ```
 
+Add to `tests/test_search.py`:
+
+```python
+def test_astral_names_tie_break_by_code_point_not_utf16_unit():
+    index = TagIndex(artifact.decode((FIXTURES / "artifact.bin").read_bytes()))
+    assert [hit.name for hit in index.search("x")] == ["x\ue000x", "x\U00010000"]
+```
+
+Add to `tests/test_search_js.mjs`:
+
+```javascript
+test("astral names tie-break by code point, not UTF-16 code unit", () => {
+  const index = new TagIndex(decodeArtifact(artifactBuffer));
+  assert.deepEqual(index.search("x").map((hit) => hit.name), ["x\ue000x", "x\U00010000"]);
+});
+```
+
 Run: `.venv/bin/python -m pytest tests/test_search.py -v && node --test tests/test_search_js.mjs`
-Expected: PASS (26 search tests, 7 Node tests)
+Expected: PASS (22 Python search tests, 8 Node tests)
 
 - [ ] **Step 6: Commit**
 
