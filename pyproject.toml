@@ -13,6 +13,9 @@ web = "web"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The repository root holds the node's __init__.py, which pytest otherwise imports as a
+# package during collection; its relative imports only resolve under ComfyUI's loader.
+addopts = "--confcutdir=tests"
 markers = [
     "slow: exercises a full-size synthetic artifact; run with -m slow",
 ]
