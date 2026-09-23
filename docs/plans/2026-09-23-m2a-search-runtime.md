@@ -1830,6 +1830,7 @@ git commit -m "Add runtime artifact store"
 **Files:**
 - Create: `nodes.py`
 - Create: `tests/test_nodes.py`
+- Modify: `pyproject.toml` (add `addopts = "--confcutdir=tests"`)
 
 **Interfaces:**
 - Consumes: `store.load_index`, `artifact.SearchHit`, `artifact.RANK_NAME_PREFIX`
@@ -1904,8 +1905,9 @@ def build_source(directory: Path) -> Path:
 def node(node_package, tmp_path, monkeypatch):
     module = importlib.import_module(f"{node_package}.nodes")
     store = importlib.import_module(f"{node_package}.store")
-    monkeypatch.setattr(store, "_artifact_cache", None, raising=False)
-    monkeypatch.setattr(store, "_custom_cache", None, raising=False)
+    monkeypatch.setattr(store, "_artifact_cache", None)
+    monkeypatch.setattr(store, "_custom_cache", None)
+    monkeypatch.setattr(store, "cache_dir", lambda: tmp_path)
     monkeypatch.setenv("DTA_LOCAL_ARTIFACT", str(build_source(tmp_path / "generated")))
     return module.DanbooruTagSearch()
 
@@ -2057,7 +2059,7 @@ Run: `.venv/bin/python -m pytest -q && node --test tests/test_search_js.mjs`
 Expected: PASS (both)
 
 ```bash
-git add nodes.py tests/test_nodes.py
+git add nodes.py tests/test_nodes.py pyproject.toml
 git commit -m "Add Danbooru Tag Search node"
 ```
 
