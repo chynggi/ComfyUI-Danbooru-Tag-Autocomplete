@@ -38,7 +38,7 @@ const CATEGORY_CHOICES = {
 
 let index = null;
 let ready = false;
-let warnedOnce = false;
+const warned = new Set();
 
 function setting(id, fallback) {
   try {
@@ -90,11 +90,14 @@ function showBanner(message) {
   banner.textContent = `${message} (click to dismiss)`;
 }
 
-function warn(message, error) {
-  if (!warnedOnce) {
-    warnedOnce = true;
-    console.warn(`[${EXTENSION_NAME}] ${message}`, error ?? "");
+// One flag per path, not one for the whole file: a problem attaching to a widget must not
+// consume the only warning a later search failure would have produced.
+function warn(key, message, error) {
+  if (warned.has(key)) {
+    return;
   }
+  warned.add(key);
+  console.warn(`[${EXTENSION_NAME}] ${message}`, error ?? "");
 }
 
 async function fetchStatus() {
@@ -141,7 +144,9 @@ async function loadIndex() {
     status = await fetchStatus();
   }
   if (status.state !== "ready") {
-    throw new Error(status.error ?? status.state ?? "the tag database is unavailable");
+    const error = new Error(status.error ?? status.state ?? "the tag database is unavailable");
+    error.databaseUnavailable = true;
+    throw error;
   }
   return fetchCustom(await fetchArtifact());
 }
@@ -206,7 +211,7 @@ function attach(widget) {
         showPostCount: current.showPostCount,
       });
     } catch (error) {
-      warn("search failed; suggestions are off", error);
+      warn("search", "search failed; suggestions are off", error);
       dropdown.hide();
       ready = false;
     }
@@ -263,7 +268,7 @@ app.registerExtension({
           attach(result?.widget);
         }
       } catch (error) {
-        warn("could not attach to a prompt field", error);
+        warn("attach", "could not attach to a prompt field", error);
       }
       return result;
     };
@@ -278,8 +283,14 @@ app.registerExtension({
       ready = true;
       observeTextareas();
     } catch (error) {
-      warn("tag database unavailable; suggestions are off", error);
-      showBanner(`Danbooru tag autocomplete is unavailable: ${error.message}`);
+      // The spec separates the two cases. A database that is missing, errored or not downloaded
+      // in time is something the user can act on, so it gets a visible explanation. Any other
+      // exception — while building the index or while searching — is only logged, because it is
+      // not a condition the user can fix and a banner would not tell them anything useful.
+      if (error?.databaseUnavailable === true) {
+        showBanner(`Danbooru tag autocomplete is unavailable: ${error.message ?? String(error)}`);
+      }
+      warn("load", "suggestions are off; the tag database could not be loaded", error);
     }
   },
 });
