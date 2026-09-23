@@ -587,9 +587,9 @@ uv pip install --python .venv/bin/python pytest pyarrow pyyaml requests
 .venv/bin/python -m pytest tests/test_benchmark.py -m slow -v -s
 ```
 
-The gates measure a synthetic set at upstream scale, a synthetic set at the shipped profile's scale,
-and the real artifact when `generated/tags.bin.gz` exists — which is why the update workflow builds
-before it tests.
+The gates measure the real artifact when `generated/tags.bin.gz` exists, plus two synthetic sets of
+about 1.71 million tags that stress-test structural cost at roughly nine times the ~194,000 tags that
+actually ship. That is why the update workflow builds before it tests.
 
 ## Development overrides
 
@@ -852,6 +852,13 @@ machine; CI figures are from `ubuntu-latest` on 2026-09-23.
 CI is roughly 1.5 times slower than the development machine on these measurements, which is the
 figure to keep in mind when reading them. The run that failed before the budget was split measured
 57.82 ms on the synthetic gate and 30.25 ms on the real-artifact gate.
+
+Two things about the figures elsewhere in this plan that look like contradictions and are not. The
+local figure for the distributed one-character gate appears as 38.59, 39.79 and 39.33 ms in different
+places, because each is a different run of a timing gate on the same machine; treat the band as the
+measurement, not any single value. And the shipped artifact's tag count moved from 193,803 to 193,828
+between M1's build and the 2026-09-23 build, because upstream added tags; both numbers were correct
+for the artifact that existed when they were written.
 
 ### Publication details
 
