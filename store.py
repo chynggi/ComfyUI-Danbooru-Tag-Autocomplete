@@ -119,11 +119,15 @@ def _data_version() -> str | None:
 
 def status() -> Status:
     """Report the cache state. Never raises."""
-    if artifact_path().exists() and metadata_path().exists():
-        with _lock:
-            if _state != STATE_DOWNLOADING:
-                return Status(STATE_READY, _data_version(), None)
+    ready = artifact_path().exists() and metadata_path().exists()
     with _lock:
+        if ready and _state != STATE_DOWNLOADING:
+            return Status(STATE_READY, _data_version(), None)
+        if not ready and _state == STATE_READY:
+            # The cache was deleted after a completed load. Reporting READY would leave the
+            # status route with nothing to do while /db answers 404, so the frontend would go
+            # quiet with no way back but a restart. Report MISSING so a download starts.
+            return Status(STATE_MISSING, _data_version(), None)
         return Status(_state, _data_version(), _error)
 
 

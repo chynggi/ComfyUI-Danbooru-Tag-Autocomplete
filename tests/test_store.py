@@ -300,3 +300,16 @@ def test_download_records_an_error_when_the_thread_cannot_start(store, monkeypat
     assert status.state == store.STATE_ERROR
     assert "could not start the download thread" in status.error
     assert store._download_thread is None
+
+
+def test_status_reports_missing_when_a_ready_cache_is_deleted(store):
+    build_artifact(store.cache_dir())
+    # A completed download leaves the module holding STATE_READY. Deleting the cache afterwards
+    # must not leave it claiming to be ready, because the status route only starts a new download
+    # when the state is MISSING.
+    store._state = store.STATE_READY
+    assert store.status().state == store.STATE_READY
+
+    (store.cache_dir() / "tags.bin.gz").unlink()
+
+    assert store.status().state == store.STATE_MISSING
