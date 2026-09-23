@@ -1169,10 +1169,11 @@ intended use; a multi-select, if the frontend supports one, is a later change.
 **Loading and failure.** The spec separates two cases and so does this file. When the database is
 unavailable — `/status` reports `missing` or `error`, or a download never finishes within sixty
 seconds — the user gets a visible, dismissible banner plus a console log, and the autocomplete
-stays off. That is `setup`'s catch. When an exception is thrown later instead, while building the
-index or while searching for a suggestion, only the dropdown is disabled and the error is logged
-once; the field keeps working and the user is not interrupted mid-keystroke. That is `refresh`'s
-catch, and it deliberately shows nothing.
+stays off. That is `setup`'s catch. Any other exception — while building the index, or
+while searching for a suggestion later — disables only the dropdown and logs once, without
+showing a banner: the field keeps working, the user is not interrupted mid-keystroke, and the
+condition is not one they could act on. That is `refresh`'s catch and the non-`status` half of
+`setup`'s.
 
 The spec asks for a toast in the first case. This file uses a small element it owns, because a
 toast API is version-dependent and this plan cannot verify one, while a banner always renders.
@@ -1227,7 +1228,7 @@ const CATEGORY_CHOICES = {
 
 let index = null;
 let ready = false;
-let warnedOnce = false;
+const warned = new Set();
 
 function setting(id, fallback) {
   try {
@@ -1279,11 +1280,14 @@ function showBanner(message) {
   banner.textContent = `${message} (click to dismiss)`;
 }
 
-function warn(message, error) {
-  if (!warnedOnce) {
-    warnedOnce = true;
-    console.warn(`[${EXTENSION_NAME}] ${message}`, error ?? "");
+// One flag per path, not one for the whole file: a problem attaching to a widget must not
+// consume the only warning a later search failure would have produced.
+function warn(key, message, error) {
+  if (warned.has(key)) {
+    return;
   }
+  warned.add(key);
+  console.warn(`[${EXTENSION_NAME}] ${message}`, error ?? "");
 }
 
 async function fetchStatus() {
@@ -1330,7 +1334,9 @@ async function loadIndex() {
     status = await fetchStatus();
   }
   if (status.state !== "ready") {
-    throw new Error(status.error ?? status.state ?? "the tag database is unavailable");
+    const error = new Error(status.error ?? status.state ?? "the tag database is unavailable");
+    error.databaseUnavailable = true;
+    throw error;
   }
   return fetchCustom(await fetchArtifact());
 }
@@ -1395,7 +1401,7 @@ function attach(widget) {
         showPostCount: current.showPostCount,
       });
     } catch (error) {
-      warn("search failed; suggestions are off", error);
+      warn("search", "search failed; suggestions are off", error);
       dropdown.hide();
       ready = false;
     }
@@ -1452,7 +1458,7 @@ app.registerExtension({
           attach(result?.widget);
         }
       } catch (error) {
-        warn("could not attach to a prompt field", error);
+        warn("attach", "could not attach to a prompt field", error);
       }
       return result;
     };
@@ -1467,8 +1473,14 @@ app.registerExtension({
       ready = true;
       observeTextareas();
     } catch (error) {
-      warn("tag database unavailable; suggestions are off", error);
-      showBanner(`Danbooru tag autocomplete is unavailable: ${error.message}`);
+      // The spec separates the two cases. A database that is missing, errored or not downloaded
+      // in time is something the user can act on, so it gets a visible explanation. Any other
+      // exception — while building the index or while searching — is only logged, because it is
+      // not a condition the user can fix and a banner would not tell them anything useful.
+      if (error?.databaseUnavailable === true) {
+        showBanner(`Danbooru tag autocomplete is unavailable: ${error.message ?? String(error)}`);
+      }
+      warn("load", "suggestions are off; the tag database could not be loaded", error);
     }
   },
 });
@@ -1600,6 +1612,7 @@ The browser behaviour is verified by hand, as the design specifies. Run ComfyUI,
 - After scrolling the page itself, the list still appears beside the caret.
 - The negative prompt field, and any other node with a multiline string input, behaves the same.
 - Two `CLIPTextEncode` nodes can be used one after the other with no cross-talk.
+- Delete a node with a prompt field and add a new one; suggestions still appear in the new field.
 - Typing a plain sentence with no matches leaves the field exactly as before: no interception,
   no swallowed keys, no flicker.
 - With Nodes 2.0 (`Modern Node Design`) enabled, the same checks pass.
