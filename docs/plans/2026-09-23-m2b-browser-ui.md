@@ -289,8 +289,14 @@ field behaves exactly as it did before the extension loaded, and making the deci
 function is what lets it be tested rather than hoped for.
 
 `Escape` closes; `Tab` and `Enter` accept only when their settings allow it, and `Enter`
-accepts only without Shift so multi-line prompts still work. `nextIndex` wraps around on the
-arrow keys and clamps on page keys, and returns `-1` for an empty list.
+accepts only without Shift so multi-line prompts still work.
+
+`nextIndex` wraps around on the arrow keys and clamps on page keys, and returns `-1` for an
+empty list. When nothing is selected yet (`index < 0`) the first movement selects an end of the
+list — the first row for a downward action, the last row for an upward one — which is the
+standard listbox behaviour. That case is defined here rather than left to the caller because
+`nextIndex` is a pure function and an undefined input is a defect waiting to happen; it is also
+pinned by its own test.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -350,9 +356,15 @@ test("ordinary typing is never intercepted", () => {
 });
 
 test("nextIndex wraps on the arrow keys", () => {
-  assert.equal(nextIndex(-1, ACTION_DOWN, 3), 0);
   assert.equal(nextIndex(2, ACTION_DOWN, 3), 0);
   assert.equal(nextIndex(0, ACTION_UP, 3), 2);
+});
+
+test("nextIndex selects an end of the list when nothing is selected yet", () => {
+  assert.equal(nextIndex(-1, ACTION_DOWN, 3), 0);
+  assert.equal(nextIndex(-1, ACTION_PAGE_DOWN, 30), 0);
+  assert.equal(nextIndex(-1, ACTION_UP, 3), 2);
+  assert.equal(nextIndex(-1, ACTION_PAGE_UP, 30), 29);
 });
 
 test("nextIndex clamps on the page keys", () => {
@@ -425,16 +437,28 @@ export function nextIndex(index, action, count, page = PAGE_SIZE) {
   if (count <= 0) {
     return -1;
   }
-  const current = index < 0 ? 0 : index;
+  if (index < 0) {
+    // Nothing is selected yet: the first movement selects an end of the list.
+    switch (action) {
+      case ACTION_DOWN:
+      case ACTION_PAGE_DOWN:
+        return 0;
+      case ACTION_UP:
+      case ACTION_PAGE_UP:
+        return count - 1;
+      default:
+        return index;
+    }
+  }
   switch (action) {
     case ACTION_DOWN:
-      return (current + 1) % count;
+      return (index + 1) % count;
     case ACTION_UP:
-      return (current - 1 + count) % count;
+      return (index - 1 + count) % count;
     case ACTION_PAGE_DOWN:
-      return Math.min(count - 1, current + page);
+      return Math.min(count - 1, index + page);
     case ACTION_PAGE_UP:
-      return Math.max(0, current - page);
+      return Math.max(0, index - page);
     default:
       return index;
   }
@@ -444,7 +468,7 @@ export function nextIndex(index, action, count, page = PAGE_SIZE) {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `node --test tests/test_keys_js.mjs`
-Expected: PASS (10 tests)
+Expected: PASS (11 tests)
 
 - [ ] **Step 5: Commit**
 
