@@ -463,7 +463,7 @@ print(list(document["jobs"]))
 print([step["name"] for step in document["jobs"]["data"]["steps"]])
 PY
 ```
-Expected: `['schedule', 'workflow_dispatch']`, `['data']`, and the eight step names in order.
+Expected: `['schedule', 'workflow_dispatch']`, `['data']`, and the ten step names in order.
 
 - [ ] **Step 4: Commit**
 
