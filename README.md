@@ -36,12 +36,17 @@ In ComfyUI's settings, under the `DanbooruTagAutocomplete` group:
 
 ## How the tag data updates
 
-`data/latest.json` in this repository names the current release and its `sha256`. The extension
-reads that pointer, downloads `tags.bin.gz` from the release it names, verifies the hash, and caches
-it. A scheduled workflow rebuilds from upstream every day at 03:00 KST, publishes a new
-`data-<version>` release only when the data changed, and commits the matching `data/latest.json` back
-to the repository. The extension learns of new data through that committed pointer, so updating the
-tags never needs a code update.
+`data/latest.json` in this repository names the current release and its `sha256`. When the extension
+has no cached database it reads that pointer, downloads `tags.bin.gz` from the release it names,
+verifies the hash, and caches it under ComfyUI's user directory. A scheduled workflow rebuilds from
+upstream every day at 03:00 KST, publishes a new `data-<version>` release only when the data changed,
+and commits the matching `data/latest.json` back to the repository — so publishing new tag data never
+needs a code update.
+
+An install keeps the database it already has: it does not re-read the pointer on its own. To pick up
+newer tags, delete ComfyUI's user directory `danbooru-tag-autocomplete/` and reload the page, and it
+downloads the current release. A pointer published less than five minutes ago may still be served
+cached by `raw.githubusercontent.com`, so if the data looks old, wait a moment and try again.
 
 The sources are `hlibr/danbooru-tag-metadata-snapshot` for the tag set, categories and aliases, and
 `HDiffusion/historical-danbooru-tag-counts` for daily post counts. Both are recorded with their
@@ -78,7 +83,7 @@ database.
 
 ```bash
 uv venv --python 3.13 .venv
-uv pip install --python .venv/bin/python pytest pyarrow pyyaml requests
+uv pip install --python .venv/bin/python pytest pyarrow pyyaml requests aiohttp
 .venv/bin/python build/fetch_upstream.py --cache data/raw
 .venv/bin/python build/build_database.py --profile profiles/danbooru.yaml --out generated
 .venv/bin/python build/validate_database.py --artifact generated/tags.bin.gz --metadata generated/metadata.json
@@ -92,9 +97,9 @@ uv pip install --python .venv/bin/python pytest pyarrow pyyaml requests
 .venv/bin/python -m pytest tests/test_benchmark.py -m slow -v -s
 ```
 
-The gates measure a synthetic set at upstream scale, a synthetic set at the shipped profile's scale,
-and the real artifact when `generated/tags.bin.gz` exists — which is why the update workflow builds
-before it tests.
+The gates measure the real artifact when `generated/tags.bin.gz` exists, plus two synthetic sets of
+about 1.71 million tags that stress-test structural cost at roughly nine times the ~194,000 tags that
+actually ship. That is why the update workflow builds before it tests.
 
 ## Development overrides
 

@@ -59,6 +59,13 @@ jobs:
         # -s keeps the printed p95 numbers in the log, which is where the CI figures are read from.
         run: python -m pytest -q -s
 
+      - name: Test the browser modules
+        # The browser modules have no Python dependency and no npm install: they are plain ES
+        # modules tested with node:test. These five files guard the parity between the Python and
+        # browser search implementations and the loadability of every file under web/, so they run
+        # here rather than only on the machine of whoever last touched them.
+        run: node --test tests/test_search_js.mjs tests/test_insert_js.mjs tests/test_keys_js.mjs tests/test_dropdown_js.mjs tests/test_web_assets.mjs
+
       - name: Decide whether to publish
         id: publish
         env:

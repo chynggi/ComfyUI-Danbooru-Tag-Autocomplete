@@ -5,10 +5,11 @@ Two synthetic sets are used, because they answer different questions:
 * `tag_*` at 1,710,000 entries measures structural cost at upstream scale. Its
   names all share one prefix, so a short query would match every entry and is not
   meaningful.
-* `{letter}{digits}` at the shipped profile's scale distributes the first
-  character across the alphabet, so one- and two-character prefixes match a
-  realistic fraction of the index and the gate measures the queries the frontend
-  actually issues.
+* `{letter}{digits}` at 1,709,994 entries distributes the first character
+  across the alphabet, so one- and two-character prefixes match a realistic
+  fraction of the index. That set is about nine times the ~194,000 tags that
+  actually ship, so it is a stress test rather than the query mix a user sees,
+  and its budget is looser for that reason.
 
 A third gate runs against the real artifact when `generated/tags.bin.gz` exists,
 which is after a build and in the CI job that builds before testing.
