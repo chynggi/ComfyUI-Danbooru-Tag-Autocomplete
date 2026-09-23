@@ -1166,11 +1166,16 @@ intended use; a multi-select, if the frontend supports one, is a later change.
 `InsertOnTab` (true), `InsertOnEnter` (false), `ReplaceUnderscores` (false), `ShowPostCount`
 (true), `CategoryFilter` (`all`), `ForceEnableWithOtherAutocomplete` (false).
 
-**Loading and failure.** On start the extension fetches `/status`. `ready` loads `/db` and
-`/custom`; `downloading` polls every two seconds up to sixty and then gives up; anything else
-raises. Every failure path logs once and shows a dismissible banner, because the spec requires
-a clear error rather than silence — and a version-dependent toast API is not something this
-plan can verify, so the banner is a small element this file owns.
+**Loading and failure.** The spec separates two cases and so does this file. When the database is
+unavailable — `/status` reports `missing` or `error`, or a download never finishes within sixty
+seconds — the user gets a visible, dismissible banner plus a console log, and the autocomplete
+stays off. That is `setup`'s catch. When an exception is thrown later instead, while building the
+index or while searching for a suggestion, only the dropdown is disabled and the error is logged
+once; the field keeps working and the user is not interrupted mid-keystroke. That is `refresh`'s
+catch, and it deliberately shows nothing.
+
+The spec asks for a toast in the first case. This file uses a small element it owns, because a
+toast API is version-dependent and this plan cannot verify one, while a banner always renders.
 
 **Never break the field.** If loading fails, if a search throws, or if the extension is
 disabled, the textarea keeps working and simply has no suggestions. The widget hook, the
@@ -1526,12 +1531,31 @@ test("every browser module parses", () => {
   }
 });
 
-test("every relative import resolves to a file that exists", () => {
+test("every sibling import resolves to a file that exists", () => {
   for (const name of webModules()) {
     const source = readFileSync(join(WEB, name), "utf8");
     for (const match of source.matchAll(/from\s+"(\.[^"]+)"/g)) {
-      const target = resolve(WEB, match[1]);
-      assert.ok(existsSync(target), `${name} imports ${match[1]}, which does not exist`);
+      if (!match[1].startsWith("./")) {
+        continue;
+      }
+      assert.ok(existsSync(resolve(WEB, match[1])), `${name} imports ${match[1]}, which does not exist`);
+    }
+  }
+});
+
+test("the only outside imports are ComfyUI's own frontend modules", () => {
+  // `../../scripts/*.js` is not on disk inside this repo: ComfyUI serves the frontend from its
+  // own package at /scripts/, and this module is loaded from /extensions/danbooruTagAutocomplete/,
+  // so the path is correct at runtime and unresolvable from here. Pin the allowed set to the two
+  // modules the extension actually needs, so a typo or an accidental new dependency is caught.
+  const allowed = new Set(["../../scripts/app.js", "../../scripts/widgets.js"]);
+  for (const name of webModules()) {
+    const source = readFileSync(join(WEB, name), "utf8");
+    for (const match of source.matchAll(/from\s+"(\.[^"]+)"/g)) {
+      if (match[1].startsWith("./")) {
+        continue;
+      }
+      assert.ok(allowed.has(match[1]), `${name} imports ${match[1]}, which is not a ComfyUI frontend module`);
     }
   }
 });
@@ -1551,7 +1575,7 @@ test("only the entry point registers an extension", () => {
 - [ ] **Step 2: Run it to verify it passes**
 
 Run: `node --test tests/test_web_assets.mjs`
-Expected: PASS (3 tests)
+Expected: PASS (4 tests)
 
 - [ ] **Step 3: Append the manual checklist to `README.md`**
 
@@ -1602,7 +1626,7 @@ Run:
 node --test tests/test_insert_js.mjs tests/test_keys_js.mjs tests/test_dropdown_js.mjs tests/test_web_assets.mjs tests/test_search_js.mjs
 .venv/bin/python -m pytest -q
 ```
-Expected: Node PASS (insert 13 + keys 11 + dropdown 15 + web_assets 3 + search 9 = 51), pytest PASS (156)
+Expected: Node PASS (insert 13 + keys 11 + dropdown 15 + web_assets 4 + search 9 = 52), pytest PASS (156)
 
 - [ ] **Step 5: Commit**
 
