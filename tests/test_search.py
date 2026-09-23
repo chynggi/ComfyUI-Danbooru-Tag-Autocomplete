@@ -201,3 +201,26 @@ def test_custom_override_keeps_a_deeper_main_candidate_when_it_ranks_lower():
     ))
     hits = TagIndex(main, custom=custom).search("c", limit=2)
     assert [hit.name for hit in hits] == ["c0001", "c0002"]
+
+
+def test_shared_fixture_overlay_matches_python_search():
+    expected = json.loads((FIXTURES / "queries.json").read_text(encoding="utf-8"))
+    overlay = expected["overlay"]
+    index = TagIndex(
+        artifact.decode((FIXTURES / "overlay-main.bin").read_bytes()),
+        custom=artifact.decode((FIXTURES / "overlay.bin").read_bytes()),
+    )
+    for query, hits in overlay["queries"].items():
+        actual = [
+            {
+                "name": hit.name,
+                "category": hit.category,
+                "postCount": hit.post_count,
+                "deprecated": hit.deprecated,
+                "alias": hit.alias,
+                "rank": hit.rank,
+                "nameLength": hit.name_length,
+            }
+            for hit in index.search(query, limit=overlay["limit"])
+        ]
+        assert actual == hits, query

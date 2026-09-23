@@ -1,8 +1,13 @@
-"""Regenerate tests/fixtures/artifact.bin and queries.json.
+"""Regenerate the shared Python/JavaScript parity fixtures.
 
 Run from the repo root: .venv/bin/python tests/fixtures/gen_fixture.py
-The M2 JavaScript search test consumes the same files, so the Python and
-JavaScript implementations are checked against one expected result set.
+
+Writes:
+  artifact.bin, overlay-main.bin, overlay.bin  - encoded artifacts
+  queries.json                                 - the expected results for both indexes
+
+The Node test in tests/test_search_js.mjs consumes the same files, so the two
+implementations are checked against one expected result set.
 """
 import json
 import sys
@@ -30,27 +35,69 @@ TAGSET = TagSet(
 
 QUERIES = ["blue_h", "blue_hair", "blu_h", "miku", "old_tag", "high", "zzz", ""]
 
+# An overlay that replaces a main tag with an entry ranking below the one it displaces,
+# which is the case a bounded per-source window gets wrong if it is not over-selected.
+OVERLAY_MAIN = TagSet(
+    threshold=0,
+    tags=(
+        TagEntry("c0", 0, 100, False),
+        TagEntry("c1", 0, 90, False),
+        TagEntry("c2", 0, 80, False),
+    ),
+    aliases=(),
+    alias_target=(),
+)
+
+OVERLAY = TagSet(
+    threshold=0,
+    tags=(TagEntry("c0", 4, 0, False),),
+    aliases=(),
+    alias_target=(),
+)
+
+OVERLAY_QUERIES = ["c"]
+OVERLAY_LIMIT = 1
+
 HERE = Path(__file__).resolve().parent
-(HERE / "artifact.bin").write_bytes(encode(TAGSET))
+
+
+def project(hit):
+    return {
+        "name": hit.name,
+        "category": hit.category,
+        "postCount": hit.post_count,
+        "deprecated": hit.deprecated,
+        "alias": hit.alias,
+        "rank": hit.rank,
+        "nameLength": hit.name_length,
+    }
+
+
+for filename, tagset in (("artifact.bin", TAGSET), ("overlay-main.bin", OVERLAY_MAIN), ("overlay.bin", OVERLAY)):
+    (HERE / filename).write_bytes(encode(tagset))
 
 index = TagIndex(decode((HERE / "artifact.bin").read_bytes()))
-expected = {
-    query: [
-        {
-            "name": hit.name,
-            "category": hit.category,
-            "postCount": hit.post_count,
-            "deprecated": hit.deprecated,
-            "alias": hit.alias,
-            "rank": hit.rank,
-            "nameLength": hit.name_length,
-        }
-        for hit in index.search(query)
-    ]
-    for query in QUERIES
+expected = {query: [project(hit) for hit in index.search(query)] for query in QUERIES}
+
+overlay_index = TagIndex(
+    decode((HERE / "overlay-main.bin").read_bytes()),
+    custom=decode((HERE / "overlay.bin").read_bytes()),
+)
+overlay_expected = {
+    query: [project(hit) for hit in overlay_index.search(query, limit=OVERLAY_LIMIT)]
+    for query in OVERLAY_QUERIES
 }
+
 (HERE / "queries.json").write_text(
-    json.dumps({"threshold": TAGSET.threshold, "queries": expected}, indent=2) + "\n",
+    json.dumps(
+        {
+            "threshold": TAGSET.threshold,
+            "queries": expected,
+            "overlay": {"limit": OVERLAY_LIMIT, "queries": overlay_expected},
+        },
+        indent=2,
+    )
+    + "\n",
     encoding="utf-8",
 )
-print("wrote", HERE / "artifact.bin", "and", HERE / "queries.json")
+print("wrote", HERE / "artifact.bin", HERE / "overlay-main.bin", HERE / "overlay.bin", "and", HERE / "queries.json")

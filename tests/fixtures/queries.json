@@ -95,5 +95,21 @@
     ],
     "zzz": [],
     "": []
+  },
+  "overlay": {
+    "limit": 1,
+    "queries": {
+      "c": [
+        {
+          "name": "c1",
+          "category": 0,
+          "postCount": 90,
+          "deprecated": false,
+          "alias": null,
+          "rank": 1,
+          "nameLength": 2
+        }
+      ]
+    }
   }
 }
