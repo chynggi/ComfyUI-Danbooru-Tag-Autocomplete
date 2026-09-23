@@ -1,0 +1,1296 @@
+# Danbooru Tag Autocomplete — M2b Browser UI Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Make the autocomplete actually appear: typing in any multiline prompt field shows ranked Danbooru tag suggestions, and accepting one inserts the canonical tag without disturbing the text around it.
+
+**Architecture:** The pure logic is separated from the DOM so it can be tested under Node without a browser: `web/insert.js` owns token ranges and insertion planning, `web/keys.js` owns the keyboard decision table, and both are covered by `node --test`. The DOM layers (`web/caret.js`, `web/dropdown.js`) and the ComfyUI entry point (`web/dtautocomplete.js`) sit on top and are verified by the spec's manual checklist.
+
+**Tech Stack:** Browser ES modules, Node 22 (`node --test`, no npm dependencies), ComfyUI 0.37.0 / frontend 1.53.6. No build step, no bundler.
+
+**Spec:** `docs/specs/2026-09-22-tag-autocomplete-design.md` (§9 and §15 in particular)
+
+## Global Constraints
+
+- Project license: MIT.
+- Node runtime dependencies: **0** additional in the ComfyUI process; the browser loads no third-party code. `node:test` and `node:assert` only, for the tests.
+- Every file under `web/` is loaded by ComfyUI as an extension module: `server.py` globs `EXTENSION_WEB_DIRS` recursively for `**/*.js` and the frontend `import()`s each one. A module with no top-level side effects is therefore required; only `dtautocomplete.js` registers anything.
+- Use **`widget.element`** for the textarea. Never `widget.inputEl` — it is a deprecated alias that was `undefined` in frontend 1.40.2 and broke another extension.
+- Hook all `ComfyWidgets.STRING` widgets with `multiline: true`, plus a `MutationObserver` fallback for `textarea.comfy-multiline-input`, so Nodes 2.0's Vue path is covered too.
+- **When the dropdown is closed, no key is intercepted.** A prompt field must behave exactly as it did before the extension loaded.
+- Never let a failure in this extension break the prompt field: a missing database, a failed fetch, a parse error, or an internal exception disables only the dropdown, logs once, and leaves typing untouched.
+- The extension's registered `name` is `danbooruTagAutocomplete`; settings ids are `DanbooruTagAutocomplete.*`.
+- The search contract is `web/search.js`'s `TagIndex`, which is verified against `tests/fixtures/` by `tests/test_search_js.mjs`. Do not change its behaviour here.
+- Commit message style: `Add ...`, `Fix ...`, `Use ...`, `Remove ...` (short, imperative).
+- Never modify files outside this repo folder.
+
+## File Structure
+
+| File | Responsibility |
+|---|---|
+| `web/insert.js` (create) | Pure token range and insertion planning; no DOM |
+| `web/keys.js` (create) | Pure keyboard decision table and selection movement; no DOM |
+| `web/caret.js` (create) | Caret pixel coordinates inside a textarea, via a mirror element |
+| `web/dropdown.js` (create) | The suggestion list: DOM, selection state, mouse and keyboard dispatch |
+| `web/dtautocomplete.js` (create) | ComfyUI entry point: widget hook, observer, settings, database loading, status UX |
+| `tests/test_insert_js.mjs` (create) | Node tests for `web/insert.js` |
+| `tests/test_keys_js.mjs` (create) | Node tests for `web/keys.js` |
+| `tests/test_web_assets.mjs` (create) | Every `web/*.js` parses and imports only paths that exist |
+| `README.md` (modify) | The manual browser checklist and how to use custom tags |
+
+M2a is complete and merged: `web/search.js`, the `/danbooru-tag-autocomplete/*` routes and
+`tests/fixtures/` are all in place and are consumed here.
+
+---
+
+### Task 1: Insertion planning
+
+**Files:**
+- Create: `web/insert.js`
+- Create: `tests/test_insert_js.mjs`
+
+**Interfaces:**
+- Consumes: nothing.
+- Produces (ES module exports):
+  - `TOKEN_SEPARATORS: Set<string>` — `,`, `\n`, `;`
+  - `tokenRange(text: string, caret: number) -> { start: number, end: number }` — the range to replace: from just after the last separator before the caret, to the next separator at or after the caret, with trailing whitespace trimmed but never past the caret
+  - `planInsertion(text: string, caret: number, replacement: string, options?: { replaceUnderscores?: boolean }) -> { start: number, end: number, replacement: string, text: string, caret: number }` — `replacement` is the string to insert, including any `", "` suffix; `text` and `caret` are the whole updated value and the caret position after it
+
+**Semantics.** The token under the caret is the whole separator-delimited run containing it,
+because a Danbooru tag may contain spaces (`blue hair` normalizes to `blue_hair`). Trailing
+whitespace is trimmed from the end of the range so `"1girl, blue_h , x"` keeps its space
+before the comma, and the caret is never moved backwards past where the token ends.
+
+A `", "` suffix is appended unless the character after the range is already a separator or
+whitespace, so `"1girl, blue_h"` becomes `"1girl, blue_hair, "` while `"1girl, blue_h, x"`
+becomes `"1girl, blue_hair, x"` with its existing comma untouched.
+
+The range and the inserted string are returned alongside the whole updated value so the
+caller can either assign `text` or select `[start, end)` and insert `replacement`, which is
+what keeps the change on the browser's undo stack.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `tests/test_insert_js.mjs`:
+
+```javascript
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { TOKEN_SEPARATORS, planInsertion, tokenRange } from "../web/insert.js";
+
+test("the separator set is the one the index tokenizer uses", () => {
+  assert.deepEqual([...TOKEN_SEPARATORS].sort(), ["\n", ",", ";"]);
+});
+
+test("tokenRange covers the run up to the next separator", () => {
+  assert.deepEqual(tokenRange("1girl, blue_h", 13), { start: 7, end: 13 });
+  assert.deepEqual(tokenRange("blue_hair, 1girl", 4), { start: 0, end: 9 });
+  assert.deepEqual(tokenRange("", 0), { start: 0, end: 0 });
+});
+
+test("tokenRange never returns a range that starts after the caret", () => {
+  const range = tokenRange("1girl, blue_hair, solo", 14);
+  assert.ok(range.start <= 14);
+  assert.ok(range.end >= 14);
+});
+
+test("tokenRange keeps a space that precedes a separator", () => {
+  assert.deepEqual(tokenRange("1girl, blue_h , x", 13), { start: 7, end: 13 });
+});
+
+test("tokenRange treats internal spaces as part of the token", () => {
+  assert.deepEqual(tokenRange("blue hair", 9), { start: 0, end: 9 });
+});
+
+test("planInsertion replaces the token and appends a separator", () => {
+  assert.deepEqual(planInsertion("1girl, blue_h", 13, "blue_hair"), {
+    start: 7,
+    end: 13,
+    replacement: "blue_hair, ",
+    text: "1girl, blue_hair, ",
+    caret: 18,
+  });
+});
+
+test("planInsertion keeps an existing separator and its spacing", () => {
+  assert.deepEqual(planInsertion("1girl, blue_h, solo", 13, "blue_hair"), {
+    start: 7,
+    end: 13,
+    replacement: "blue_hair",
+    text: "1girl, blue_hair, solo",
+    caret: 16,
+  });
+  assert.deepEqual(planInsertion("1girl, blue_h , x", 13, "blue_hair"), {
+    start: 7,
+    end: 13,
+    replacement: "blue_hair",
+    text: "1girl, blue_hair , x",
+    caret: 16,
+  });
+});
+
+test("planInsertion replaces a token in the middle of the text", () => {
+  assert.deepEqual(planInsertion("blue_hair, 1girl", 4, "blue"), {
+    start: 0,
+    end: 9,
+    replacement: "blue, ",
+    text: "blue, 1girl",
+    caret: 6,
+  });
+});
+
+test("planInsertion maps underscores to spaces when asked", () => {
+  assert.deepEqual(planInsertion("blue_h", 6, "blue_hair", { replaceUnderscores: true }), {
+    start: 0,
+    end: 6,
+    replacement: "blue hair, ",
+    text: "blue hair, ",
+    caret: 11,
+  });
+});
+
+test("planInsertion on an empty field produces a trailing separator and caret", () => {
+  assert.deepEqual(planInsertion("", 0, "1girl"), {
+    start: 0,
+    end: 0,
+    replacement: "1girl, ",
+    text: "1girl, ",
+    caret: 7,
+  });
+});
+
+test("planInsertion does not double a separator before a space", () => {
+  assert.deepEqual(planInsertion("1girl, blue_h x", 13, "blue_hair"), {
+    start: 7,
+    end: 15,
+    replacement: "blue_hair",
+    text: "1girl, blue_hair x",
+    caret: 16,
+  });
+});
+
+test("planInsertion's own text and caret agree with splicing its replacement", () => {
+  const cases = [
+    ["1girl, blue_h", 13, "blue_hair"],
+    ["1girl, blue_h, solo", 13, "blue_hair"],
+    ["blue_hair, 1girl", 4, "blue"],
+    ["", 0, "1girl"],
+  ];
+  for (const [text, caret, replacement] of cases) {
+    const plan = planInsertion(text, caret, replacement);
+    assert.equal(plan.text, text.slice(0, plan.start) + plan.replacement + text.slice(plan.end));
+    assert.equal(plan.caret, plan.start + plan.replacement.length);
+  }
+});
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `node --test tests/test_insert_js.mjs`
+Expected: FAIL with `Cannot find module .../web/insert.js`
+
+- [ ] **Step 3: Write `web/insert.js`**
+
+```javascript
+// Pure text-editing helpers for a prompt textarea. No DOM, so tests/test_insert_js.mjs can
+// exercise them under Node.
+//
+// The token under the caret is the whole separator-delimited run containing it, because a
+// Danbooru tag may contain spaces ("blue hair" normalizes to "blue_hair").
+
+export const TOKEN_SEPARATORS = new Set([",", "\n", ";"]);
+
+const WHITESPACE = /\s/;
+
+export function tokenRange(text, caret) {
+  const stop = Math.max(0, Math.min(caret, text.length));
+  let start = 0;
+  for (let index = stop - 1; index >= 0; index -= 1) {
+    if (TOKEN_SEPARATORS.has(text[index])) {
+      start = index + 1;
+      break;
+    }
+  }
+  let end = stop;
+  while (end < text.length && !TOKEN_SEPARATORS.has(text[end])) {
+    end += 1;
+  }
+  while (end > stop && WHITESPACE.test(text[end - 1])) {
+    end -= 1;
+  }
+  return { start, end };
+}
+
+export function planInsertion(text, caret, replacement, { replaceUnderscores = false } = {}) {
+  const { start, end } = tokenRange(text, caret);
+  const inserted = replaceUnderscores ? replacement.replace(/_/g, " ") : replacement;
+  const next = text[end];
+  const suffix = next === undefined || TOKEN_SEPARATORS.has(next) || WHITESPACE.test(next) ? "" : ", ";
+  const insertion = inserted + suffix;
+  return {
+    start,
+    end,
+    replacement: insertion,
+    text: text.slice(0, start) + insertion + text.slice(end),
+    caret: start + insertion.length,
+  };
+}
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `node --test tests/test_insert_js.mjs`
+Expected: PASS (12 tests)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add web/insert.js tests/test_insert_js.mjs
+git commit -m "Add prompt insertion planning"
+```
+
+---
+
+### Task 2: Keyboard decisions
+
+**Files:**
+- Create: `web/keys.js`
+- Create: `tests/test_keys_js.mjs`
+
+**Interfaces:**
+- Consumes: nothing.
+- Produces (ES module exports):
+  - `ACTION_IGNORE`, `ACTION_UP`, `ACTION_DOWN`, `ACTION_PAGE_UP`, `ACTION_PAGE_DOWN`, `ACTION_ACCEPT`, `ACTION_CLOSE` — string constants
+  - `keyAction(event: { key: string, shiftKey?: boolean }, state: { open: boolean, insertOnTab: boolean, insertOnEnter: boolean }) -> string`
+  - `nextIndex(index: number, action: string, count: number, page?: number) -> number` — `page` defaults to 10
+
+**Semantics.** `keyAction` returns `ACTION_IGNORE` for everything while the dropdown is
+closed. That is the whole point of the module: the spec's hard requirement is that a prompt
+field behaves exactly as it did before the extension loaded, and making the decision a pure
+function is what lets it be tested rather than hoped for.
+
+`Escape` closes; `Tab` and `Enter` accept only when their settings allow it, and `Enter`
+accepts only without Shift so multi-line prompts still work. `nextIndex` wraps around on the
+arrow keys and clamps on page keys, and returns `-1` for an empty list.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `tests/test_keys_js.mjs`:
+
+```javascript
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  ACTION_ACCEPT,
+  ACTION_CLOSE,
+  ACTION_DOWN,
+  ACTION_IGNORE,
+  ACTION_PAGE_DOWN,
+  ACTION_PAGE_UP,
+  ACTION_UP,
+  keyAction,
+  nextIndex,
+} from "../web/keys.js";
+
+const OPEN = { open: true, insertOnTab: true, insertOnEnter: false };
+
+test("a closed dropdown ignores every key", () => {
+  const closed = { open: false, insertOnTab: true, insertOnEnter: true };
+  for (const key of ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Tab", "Enter", "Escape", "a", ",", " "]) {
+    assert.equal(keyAction({ key }, closed), ACTION_IGNORE, key);
+  }
+});
+
+test("an open dropdown moves the selection", () => {
+  assert.equal(keyAction({ key: "ArrowUp" }, OPEN), ACTION_UP);
+  assert.equal(keyAction({ key: "ArrowDown" }, OPEN), ACTION_DOWN);
+  assert.equal(keyAction({ key: "PageUp" }, OPEN), ACTION_PAGE_UP);
+  assert.equal(keyAction({ key: "PageDown" }, OPEN), ACTION_PAGE_DOWN);
+});
+
+test("Escape closes an open dropdown", () => {
+  assert.equal(keyAction({ key: "Escape" }, OPEN), ACTION_CLOSE);
+});
+
+test("Tab accepts only when the setting allows it", () => {
+  assert.equal(keyAction({ key: "Tab" }, OPEN), ACTION_ACCEPT);
+  assert.equal(keyAction({ key: "Tab" }, { ...OPEN, insertOnTab: false }), ACTION_IGNORE);
+});
+
+test("Enter accepts only when the setting allows it and Shift is not held", () => {
+  assert.equal(keyAction({ key: "Enter" }, { ...OPEN, insertOnEnter: true }), ACTION_ACCEPT);
+  assert.equal(keyAction({ key: "Enter", shiftKey: true }, { ...OPEN, insertOnEnter: true }), ACTION_IGNORE);
+  assert.equal(keyAction({ key: "Enter" }, OPEN), ACTION_IGNORE);
+});
+
+test("ordinary typing is never intercepted", () => {
+  for (const key of ["a", "1", "_", ",", " ", "Backspace", "Delete"]) {
+    assert.equal(keyAction({ key }, OPEN), ACTION_IGNORE, key);
+  }
+});
+
+test("nextIndex wraps on the arrow keys", () => {
+  assert.equal(nextIndex(-1, ACTION_DOWN, 3), 0);
+  assert.equal(nextIndex(2, ACTION_DOWN, 3), 0);
+  assert.equal(nextIndex(0, ACTION_UP, 3), 2);
+});
+
+test("nextIndex clamps on the page keys", () => {
+  assert.equal(nextIndex(0, ACTION_PAGE_DOWN, 30), 10);
+  assert.equal(nextIndex(29, ACTION_PAGE_DOWN, 30), 29);
+  assert.equal(nextIndex(0, ACTION_PAGE_UP, 30), 0);
+  assert.equal(nextIndex(29, ACTION_PAGE_UP, 30), 19);
+});
+
+test("nextIndex returns -1 for an empty list", () => {
+  assert.equal(nextIndex(0, ACTION_DOWN, 0), -1);
+  assert.equal(nextIndex(-1, ACTION_UP, 0), -1);
+});
+
+test("nextIndex leaves the index alone for a non-movement action", () => {
+  assert.equal(nextIndex(4, ACTION_ACCEPT, 10), 4);
+  assert.equal(nextIndex(4, ACTION_IGNORE, 10), 4);
+});
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `node --test tests/test_keys_js.mjs`
+Expected: FAIL with `Cannot find module .../web/keys.js`
+
+- [ ] **Step 3: Write `web/keys.js`**
+
+```javascript
+// Pure keyboard decisions for the suggestion list. No DOM, so tests/test_keys_js.mjs can
+// exercise them under Node.
+//
+// The invariant this module exists to make testable: while the list is closed, nothing is
+// intercepted, so a prompt field behaves exactly as it did before the extension loaded.
+
+export const ACTION_IGNORE = "ignore";
+export const ACTION_UP = "up";
+export const ACTION_DOWN = "down";
+export const ACTION_PAGE_UP = "pageUp";
+export const ACTION_PAGE_DOWN = "pageDown";
+export const ACTION_ACCEPT = "accept";
+export const ACTION_CLOSE = "close";
+
+const PAGE_SIZE = 10;
+
+export function keyAction(event, { open, insertOnTab, insertOnEnter }) {
+  if (!open) {
+    return ACTION_IGNORE;
+  }
+  switch (event.key) {
+    case "ArrowUp":
+      return ACTION_UP;
+    case "ArrowDown":
+      return ACTION_DOWN;
+    case "PageUp":
+      return ACTION_PAGE_UP;
+    case "PageDown":
+      return ACTION_PAGE_DOWN;
+    case "Escape":
+      return ACTION_CLOSE;
+    case "Tab":
+      return insertOnTab ? ACTION_ACCEPT : ACTION_IGNORE;
+    case "Enter":
+      return insertOnEnter && !event.shiftKey ? ACTION_ACCEPT : ACTION_IGNORE;
+    default:
+      return ACTION_IGNORE;
+  }
+}
+
+export function nextIndex(index, action, count, page = PAGE_SIZE) {
+  if (count <= 0) {
+    return -1;
+  }
+  const current = index < 0 ? 0 : index;
+  switch (action) {
+    case ACTION_DOWN:
+      return (current + 1) % count;
+    case ACTION_UP:
+      return (current - 1 + count) % count;
+    case ACTION_PAGE_DOWN:
+      return Math.min(count - 1, current + page);
+    case ACTION_PAGE_UP:
+      return Math.max(0, current - page);
+    default:
+      return index;
+  }
+}
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `node --test tests/test_keys_js.mjs`
+Expected: PASS (10 tests)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add web/keys.js tests/test_keys_js.mjs
+git commit -m "Add suggestion list keyboard decisions"
+```
+
+---
+
+### Task 3: Caret coordinates
+
+**Files:**
+- Create: `web/caret.js`
+
+**Interfaces:**
+- Consumes: nothing.
+- Produces (ES module exports):
+  - `caretCoordinates(textarea: HTMLTextAreaElement, position: number) -> { top: number, left: number, height: number }` — page coordinates of the caret at character `position`
+  - `mirrorFor(textarea) -> HTMLDivElement` — the hidden mirror element, created once per textarea
+
+**Why a mirror rather than a public API.** Browsers expose no way to ask a textarea where a
+character is. The established technique, used by the MIT-licensed `textarea-caret-position`
+and already ported by other ComfyUI extensions, is to clone the textarea's box and typography
+into a hidden `div`, insert the text up to the position plus a marker span, and read the
+marker's offset. That is what this module does.
+
+**Verification is manual.** This module reads computed styles and lays out a real element, so
+it cannot run under `node --test` without a DOM implementation, and this project takes no npm
+dependencies. Its correctness is checked by the manual checklist in Task 6 — specifically the
+first and last lines of a wrapped paragraph, where an off-by-one is visible.
+
+- [ ] **Step 1: Write `web/caret.js`**
+
+```javascript
+// Caret pixel coordinates inside a textarea, via a hidden mirror element.
+//
+// The browser offers no API for this. The mirror technique: clone the textarea's box and
+// typography into an off-screen div, put the text up to the caret in it followed by a marker
+// span, and read the marker's offset. Ported from the MIT-licensed textarea-caret-position,
+// which other ComfyUI extensions also port.
+
+const MIRROR_PROPERTIES = [
+  "boxSizing",
+  "width",
+  "height",
+  "overflowX",
+  "overflowY",
+  "borderTopWidth",
+  "borderRightWidth",
+  "borderBottomWidth",
+  "borderLeftWidth",
+  "borderStyle",
+  "paddingTop",
+  "paddingRight",
+  "paddingBottom",
+  "paddingLeft",
+  "fontStyle",
+  "fontVariant",
+  "fontWeight",
+  "fontStretch",
+  "fontSize",
+  "fontSizeAdjust",
+  "lineHeight",
+  "fontFamily",
+  "textAlign",
+  "textTransform",
+  "textIndent",
+  "textDecoration",
+  "letterSpacing",
+  "wordSpacing",
+  "tabSize",
+  "MozTabSize",
+];
+
+function createMirror(textarea) {
+  const mirror = document.createElement("div");
+  mirror.setAttribute("aria-hidden", "true");
+  const style = mirror.style;
+  style.position = "absolute";
+  style.top = "0";
+  style.left = "0";
+  style.visibility = "hidden";
+  style.whiteSpace = "pre-wrap";
+  style.wordWrap = "break-word";
+  style.overflow = "hidden";
+  document.body.appendChild(mirror);
+  return mirror;
+}
+
+const mirrors = new WeakMap();
+
+export function mirrorFor(textarea) {
+  let mirror = mirrors.get(textarea);
+  if (mirror === undefined || !mirror.isConnected) {
+    mirror = createMirror(textarea);
+    mirrors.set(textarea, mirror);
+  }
+  return mirror;
+}
+
+function copyStyles(textarea, mirror) {
+  const computed = window.getComputedStyle(textarea);
+  const style = mirror.style;
+  for (const property of MIRROR_PROPERTIES) {
+    style[property] = computed[property];
+  }
+  style.position = "absolute";
+  style.visibility = "hidden";
+  style.whiteSpace = "pre-wrap";
+  style.wordWrap = "break-word";
+  style.overflow = "hidden";
+}
+
+export function caretCoordinates(textarea, position) {
+  const mirror = mirrorFor(textarea);
+  copyStyles(textarea, mirror);
+
+  const value = textarea.value;
+  const stop = Math.max(0, Math.min(position, value.length));
+  mirror.textContent = value.slice(0, stop);
+
+  const marker = document.createElement("span");
+  marker.textContent = value.slice(stop) || ".";
+  mirror.appendChild(marker);
+
+  const coordinates = {
+    top: marker.offsetTop + parseInt(mirror.style.borderTopWidth || "0", 10) - textarea.scrollTop,
+    left: marker.offsetLeft + parseInt(mirror.style.borderLeftWidth || "0", 10) - textarea.scrollLeft,
+    height: parseInt(mirror.style.lineHeight, 10) || marker.offsetHeight,
+  };
+  marker.remove();
+  return coordinates;
+}
+```
+
+- [ ] **Step 2: Verify it parses and exports what the dropdown will use**
+
+Run:
+```bash
+node -e "import('./web/caret.js').then((m) => console.log(Object.keys(m).sort().join(',')))"
+```
+Expected: `caretCoordinates,mirrorFor`
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add web/caret.js
+git commit -m "Add caret coordinate helper"
+```
+
+---
+
+### Task 4: The suggestion list
+
+**Files:**
+- Create: `web/dropdown.js`
+
+**Interfaces:**
+- Consumes: `web/caret.js`'s `caretCoordinates`, `web/keys.js`'s actions and `keyAction`/`nextIndex`
+- Produces (ES module exports):
+  - `CATEGORY_LABELS: Record<number, string>` — `{0: "general", 1: "artist", 3: "copyright", 4: "character", 5: "meta"}`
+  - `CATEGORY_COLORS: Record<number, string>` — one colour per category, used for the badge
+  - `formatPostCount(count: number) -> string` — `1200000` → `"1.2M"`, `82000` → `"82K"`
+  - `class TagDropdown`:
+    - `new TagDropdown(textarea, { onAccept })` — `onAccept(hit)` is called with the chosen hit; the owner performs the insertion
+    - `get isOpen() -> boolean`
+    - `show(hits, options?: { showPostCount?: boolean }) -> void` — renders `hits` and positions against the caret; an empty list hides
+    - `hide() -> void`
+    - `handleKey(event, settings) -> boolean` — returns `true` when the event was consumed, in which case the caller must `preventDefault()`
+    - `accept() -> void` — calls `onAccept` with the highlighted hit, or does nothing when nothing is highlighted
+
+**Behaviour.** The list is a `div.dtautocomplete` appended to `document.body`, so a node's
+canvas ancestry cannot clip it, and it is positioned in page coordinates from
+`caretCoordinates`. Each row shows the tag, a category badge, the post count and, when the
+match came through an alias, `alias → canonical`. The highlighted row is marked with a class
+and scrolled into view.
+
+`handleKey` returns `false` for everything that is not a movement, accept or close action, so
+typing, backspace, space and comma are untouched. That is the caller's cue to leave the event
+alone.
+
+- [ ] **Step 1: Write `web/dropdown.js`**
+
+```javascript
+// The suggestion list: DOM, selection state, and mouse and keyboard dispatch.
+//
+// The list lives on document.body so no node's canvas ancestor can clip it. Nothing here
+// knows how to search or how to edit text; it renders hits and reports the chosen one.
+
+import { caretCoordinates } from "./caret.js";
+import {
+  ACTION_ACCEPT,
+  ACTION_CLOSE,
+  ACTION_IGNORE,
+  keyAction,
+  nextIndex,
+} from "./keys.js";
+
+const ROW_CLASS = "dtautocomplete-row";
+const ACTIVE_CLASS = "dtautocomplete-row-active";
+const MAX_VISIBLE_ROWS = 10;
+
+export const CATEGORY_LABELS = { 0: "general", 1: "artist", 3: "copyright", 4: "character", 5: "meta" };
+export const CATEGORY_COLORS = { 0: "#4a7ec4", 1: "#c4554a", 3: "#9a4ac4", 4: "#4a9a6a", 5: "#b8860b" };
+
+export function formatPostCount(count) {
+  if (count >= 1_000_000) {
+    return `${(count / 1_000_000).toFixed(1)}M`;
+  }
+  if (count >= 1_000) {
+    return `${Math.round(count / 1_000)}K`;
+  }
+  return String(count);
+}
+
+function label(text, color) {
+  const span = document.createElement("span");
+  span.textContent = text;
+  span.style.color = color;
+  return span;
+}
+
+export class TagDropdown {
+  constructor(textarea, { onAccept }) {
+    this.textarea = textarea;
+    this.onAccept = onAccept;
+    this.hits = [];
+    this.index = -1;
+
+    this.element = document.createElement("div");
+    this.element.className = "dtautocomplete";
+    Object.assign(this.element.style, {
+      position: "absolute",
+      zIndex: "10000",
+      minWidth: "12rem",
+      maxWidth: "28rem",
+      maxHeight: `${MAX_VISIBLE_ROWS * 1.6}rem`,
+      overflowY: "auto",
+      padding: "0.2rem",
+      border: "1px solid #444",
+      borderRadius: "0.3rem",
+      background: "#1e1e1e",
+      color: "#e6e6e6",
+      fontFamily: "monospace",
+      fontSize: "0.8rem",
+      boxShadow: "0 0.3rem 0.8rem rgba(0, 0, 0, 0.5)",
+    });
+    this.element.hidden = true;
+    document.body.appendChild(this.element);
+  }
+
+  get isOpen() {
+    return !this.element.hidden && this.hits.length > 0;
+  }
+
+  get selected() {
+    return this.index >= 0 && this.index < this.hits.length ? this.hits[this.index] : null;
+  }
+
+  show(hits, { showPostCount = true } = {}) {
+    this.hits = hits;
+    this.showPostCount = showPostCount;
+    this.index = hits.length > 0 ? 0 : -1;
+    if (hits.length === 0) {
+      this.hide();
+      return;
+    }
+    this.#render();
+    this.#position();
+    this.element.hidden = false;
+  }
+
+  hide() {
+    this.element.hidden = true;
+    this.hits = [];
+    this.index = -1;
+  }
+
+  accept() {
+    const hit = this.selected;
+    if (hit === null) {
+      return;
+    }
+    this.hide();
+    this.onAccept(hit);
+  }
+
+  handleKey(event, settings) {
+    const action = keyAction(event, {
+      open: this.isOpen,
+      insertOnTab: settings.insertOnTab,
+      insertOnEnter: settings.insertOnEnter,
+    });
+    switch (action) {
+      case ACTION_ACCEPT:
+        this.accept();
+        return true;
+      case ACTION_CLOSE:
+        this.hide();
+        return true;
+      case ACTION_IGNORE:
+        return false;
+      default: {
+        const next = nextIndex(this.index, action, this.hits.length);
+        if (next !== this.index) {
+          this.#setIndex(next);
+        }
+        return true;
+      }
+    }
+  }
+
+  #setIndex(index) {
+    this.index = index;
+    const rows = this.element.children;
+    for (let position = 0; position < rows.length; position += 1) {
+      rows[position].classList.toggle(ACTIVE_CLASS, position === index);
+      rows[position].style.background = position === index ? "#333" : "transparent";
+    }
+    const active = rows[index];
+    if (active !== undefined && typeof active.scrollIntoView === "function") {
+      active.scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  #render() {
+    this.element.replaceChildren();
+    this.hits.forEach((hit, position) => {
+      const row = document.createElement("div");
+      row.className = ROW_CLASS;
+      row.style.display = "flex";
+      row.style.gap = "0.5rem";
+      row.style.alignItems = "center";
+      row.style.padding = "0.15rem 0.35rem";
+      row.style.cursor = "pointer";
+      row.style.whiteSpace = "nowrap";
+
+      const name = document.createElement("span");
+      name.textContent = hit.name;
+      row.appendChild(name);
+
+      if (hit.alias !== null) {
+        row.appendChild(label(`← ${hit.alias}`, "#888"));
+      }
+      row.appendChild(label(CATEGORY_LABELS[hit.category] ?? String(hit.category), CATEGORY_COLORS[hit.category] ?? "#888"));
+      if (this.showPostCount) {
+        row.appendChild(label(formatPostCount(hit.postCount), "#777"));
+      }
+      if (hit.deprecated) {
+        row.appendChild(label("deprecated", "#c4554a"));
+      }
+
+      row.addEventListener("mouseenter", () => this.#setIndex(position));
+      row.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        this.accept();
+      });
+      this.element.appendChild(row);
+    });
+    this.#setIndex(this.index);
+  }
+
+  #position() {
+    const coordinates = caretCoordinates(this.textarea, this.textarea.selectionStart);
+    this.element.style.top = `${coordinates.top + coordinates.height}px`;
+    this.element.style.left = `${coordinates.left}px`;
+  }
+}
+```
+
+- [ ] **Step 2: Verify it parses and its imports resolve**
+
+Run: `node --check web/dropdown.js && node -e "const s=require('node:fs').readFileSync('web/dropdown.js','utf8'); console.log([...s.matchAll(/from \"(\.[^\"]+)\"/g)].map((m)=>m[1]).join(','))"`
+Expected: no output from `--check`, then `./caret.js,./keys.js`
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add web/dropdown.js
+git commit -m "Add tag suggestion dropdown"
+```
+
+---
+
+### Task 5: The ComfyUI extension entry point
+
+**Files:**
+- Create: `web/dtautocomplete.js`
+
+**Interfaces:**
+- Consumes: `web/search.js`'s `TagIndex`/`decodeArtifact`/`extractToken`, `web/insert.js`'s `planInsertion`, `web/dropdown.js`'s `TagDropdown`; the `/danbooru-tag-autocomplete/{status,db,custom}` routes
+- Produces:
+  - `SETTING_IDS: Record<string, string>` — the eight setting ids
+  - the registered extension `name` is `danbooruTagAutocomplete`
+  - side effects on import: the widget hook, the observer, and the settings registration
+
+`CategoryFilter` is a native single-value combo (`all` plus one entry per category) rather than
+a multi-select, because this plan cannot verify the frontend's multi-select combo shape and a
+guess would render as a broken control. Filtering to one category at a time is enough for the
+intended use; a multi-select, if the frontend supports one, is a later change.
+
+**Settings** (all under `DanbooruTagAutocomplete.`): `Enabled` (true), `SuggestionCount` (32),
+`InsertOnTab` (true), `InsertOnEnter` (false), `ReplaceUnderscores` (false), `ShowPostCount`
+(true), `CategoryFilter` (`all`), `ForceEnableWithOtherAutocomplete` (false).
+
+**Loading and failure.** On start the extension fetches `/status`. `ready` loads `/db` and
+`/custom`; `downloading` polls every two seconds up to sixty and then gives up; anything else
+raises. Every failure path logs once and shows a dismissible banner, because the spec requires
+a clear error rather than silence — and a version-dependent toast API is not something this
+plan can verify, so the banner is a small element this file owns.
+
+**Never break the field.** If loading fails, if a search throws, or if the extension is
+disabled, the textarea keeps working and simply has no suggestions. The widget hook, the
+observer and the key handler all swallow their own errors.
+
+**Coexistence.** If another registered extension's name contains `autocompleter`, this one
+disables itself unless `ForceEnableWithOtherAutocomplete` is set.
+
+- [ ] **Step 1: Write `web/dtautocomplete.js`**
+
+```javascript
+// ComfyUI entry point: hook every multiline prompt field and show tag suggestions in it.
+//
+// Everything here is defensive by design. A prompt field must behave exactly as it did
+// before this extension loaded, so every failure path disables the suggestions and leaves
+// typing untouched.
+
+import { app } from "../../scripts/app.js";
+import { ComfyWidgets } from "../../scripts/widgets.js";
+import { TagDropdown } from "./dropdown.js";
+import { planInsertion } from "./insert.js";
+import { TagIndex, decodeArtifact, extractToken } from "./search.js";
+
+const EXTENSION_NAME = "danbooruTagAutocomplete";
+const PREFIX = "DanbooruTagAutocomplete";
+const ROUTES = "/danbooru-tag-autocomplete";
+const POLL_INTERVAL_MS = 2000;
+const POLL_ATTEMPTS = 30;
+const BANNER_ID = "dtautocomplete-status";
+
+export const SETTING_IDS = {
+  enabled: `${PREFIX}.Enabled`,
+  suggestionCount: `${PREFIX}.SuggestionCount`,
+  insertOnTab: `${PREFIX}.InsertOnTab`,
+  insertOnEnter: `${PREFIX}.InsertOnEnter`,
+  replaceUnderscores: `${PREFIX}.ReplaceUnderscores`,
+  showPostCount: `${PREFIX}.ShowPostCount`,
+  categoryFilter: `${PREFIX}.CategoryFilter`,
+  forceEnable: `${PREFIX}.ForceEnableWithOtherAutocomplete`,
+};
+
+const CATEGORY_CHOICES = {
+  general: 0,
+  artist: 1,
+  copyright: 3,
+  character: 4,
+  meta: 5,
+};
+
+let index = null;
+let ready = false;
+let warnedOnce = false;
+
+function setting(id, fallback) {
+  try {
+    const value = app.extensionManager?.setting?.get?.(id);
+    return value === undefined ? fallback : value;
+  } catch (error) {
+    return fallback;
+  }
+}
+
+function settings() {
+  const chosen = setting(SETTING_IDS.categoryFilter, "all");
+  const value = CATEGORY_CHOICES[chosen];
+  return {
+    enabled: setting(SETTING_IDS.enabled, true),
+    suggestionCount: setting(SETTING_IDS.suggestionCount, 32),
+    insertOnTab: setting(SETTING_IDS.insertOnTab, true),
+    insertOnEnter: setting(SETTING_IDS.insertOnEnter, false),
+    replaceUnderscores: setting(SETTING_IDS.replaceUnderscores, false),
+    showPostCount: setting(SETTING_IDS.showPostCount, true),
+    categories: value === undefined ? null : new Set([value]),
+  };
+}
+
+function showBanner(message) {
+  let banner = document.getElementById(BANNER_ID);
+  if (banner === null) {
+    banner = document.createElement("div");
+    banner.id = BANNER_ID;
+    Object.assign(banner.style, {
+      position: "fixed",
+      bottom: "0.75rem",
+      left: "50%",
+      transform: "translateX(-50%)",
+      zIndex: "10001",
+      maxWidth: "40rem",
+      padding: "0.5rem 0.9rem",
+      border: "1px solid #c4554a",
+      borderRadius: "0.3rem",
+      background: "#2a1e1e",
+      color: "#f0d0cc",
+      fontFamily: "monospace",
+      fontSize: "0.8rem",
+      cursor: "pointer",
+    });
+    banner.addEventListener("click", () => banner.remove());
+    document.body.appendChild(banner);
+  }
+  banner.textContent = `${message} (click to dismiss)`;
+}
+
+function warn(message, error) {
+  if (!warnedOnce) {
+    warnedOnce = true;
+    console.warn(`[${EXTENSION_NAME}] ${message}`, error ?? "");
+  }
+}
+
+async function fetchStatus() {
+  const response = await fetch(`${ROUTES}/status`);
+  if (!response.ok) {
+    throw new Error(`status ${response.status}`);
+  }
+  return response.json();
+}
+
+async function fetchArtifact() {
+  const response = await fetch(`${ROUTES}/db`);
+  if (!response.ok) {
+    const detail = await response.json().catch(() => ({}));
+    throw new Error(detail.error ?? `db ${response.status}`);
+  }
+  return decodeArtifact(await response.arrayBuffer());
+}
+
+async function fetchCustom(main) {
+  const response = await fetch(`${ROUTES}/custom`);
+  if (!response.ok) {
+    return new TagIndex(main);
+  }
+  const payload = await response.json();
+  for (const warning of payload.warnings ?? []) {
+    console.warn(`[${EXTENSION_NAME}] ${warning}`);
+  }
+  if (!payload.available || payload.bytes === null) {
+    return new TagIndex(main);
+  }
+  const binary = atob(payload.bytes);
+  const bytes = new Uint8Array(binary.length);
+  for (let position = 0; position < binary.length; position += 1) {
+    bytes[position] = binary.charCodeAt(position);
+  }
+  return new TagIndex(main, decodeArtifact(bytes.buffer));
+}
+
+async function loadIndex() {
+  let status = await fetchStatus();
+  for (let attempt = 0; status.state === "downloading" && attempt < POLL_ATTEMPTS; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    status = await fetchStatus();
+  }
+  if (status.state !== "ready") {
+    throw new Error(status.error ?? status.state ?? "the tag database is unavailable");
+  }
+  return fetchCustom(await fetchArtifact());
+}
+
+function otherAutocompletePresent() {
+  const extensions = app.extensions;
+  if (!extensions) {
+    return false;
+  }
+  const names = typeof extensions.keys === "function" ? [...extensions.keys()] : Object.keys(extensions);
+  return names.some((name) => name !== EXTENSION_NAME && name.toLowerCase().includes("autocompleter"));
+}
+
+function attach(widget) {
+  const textarea = widget?.element;
+  if (!textarea || textarea.tagName !== "TEXTAREA" || textarea.dataset.dtaAttached === "1") {
+    return null;
+  }
+  textarea.dataset.dtaAttached = "1";
+
+  const dropdown = new TagDropdown(textarea, {
+    onAccept: (hit) => {
+      const current = settings();
+      const plan = planInsertion(textarea.value, textarea.selectionStart, hit.name, {
+        replaceUnderscores: current.replaceUnderscores,
+      });
+      // Select the range and insert, rather than assigning the whole value, so the browser's
+      // undo stack keeps the change. execCommand is deprecated but is still the only way to
+      // insert into a textarea as a native edit; when it is unavailable, setRangeText plus an
+      // input event is the fallback the spec calls for.
+      textarea.focus();
+      textarea.setSelectionRange(plan.start, plan.end);
+      let inserted = false;
+      try {
+        inserted = document.execCommand("insertText", false, plan.replacement);
+      } catch (error) {
+        inserted = false;
+      }
+      if (!inserted) {
+        textarea.setRangeText(plan.replacement, plan.start, plan.end, "end");
+        textarea.dispatchEvent(new InputEvent("input", { bubbles: true }));
+      }
+      textarea.selectionStart = plan.caret;
+      textarea.selectionEnd = plan.caret;
+      dropdown.hide();
+    },
+  });
+
+  const refresh = () => {
+    const current = settings();
+    if (!ready || !current.enabled) {
+      dropdown.hide();
+      return;
+    }
+    try {
+      const query = extractToken(textarea.value, textarea.selectionStart);
+      if (query.length === 0) {
+        dropdown.hide();
+        return;
+      }
+      dropdown.show(index.search(query, { limit: current.suggestionCount, categories: current.categories }), {
+        showPostCount: current.showPostCount,
+      });
+    } catch (error) {
+      warn("search failed; suggestions are off", error);
+      dropdown.hide();
+      ready = false;
+    }
+  };
+
+  textarea.addEventListener("input", refresh);
+  textarea.addEventListener("click", refresh);
+  textarea.addEventListener("blur", () => setTimeout(() => dropdown.hide(), 150));
+  textarea.addEventListener("keydown", (event) => {
+    if (dropdown.handleKey(event, settings())) {
+      event.preventDefault();
+    }
+  });
+  return dropdown;
+}
+
+function observeTextareas() {
+  const observer = new MutationObserver((records) => {
+    for (const record of records) {
+      for (const node of record.addedNodes) {
+        if (node.nodeType !== Node.ELEMENT_NODE) {
+          continue;
+        }
+        if (node.matches?.("textarea.comfy-multiline-input")) {
+          attach({ element: node });
+        }
+        for (const found of node.querySelectorAll?.("textarea.comfy-multiline-input") ?? []) {
+          attach({ element: found });
+        }
+      }
+    }
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+}
+
+app.registerExtension({
+  name: EXTENSION_NAME,
+  settings: [
+    { id: SETTING_IDS.enabled, name: "Enable tag autocomplete", type: "boolean", defaultValue: true },
+    { id: SETTING_IDS.suggestionCount, name: "Suggestion count", type: "number", defaultValue: 32, attrs: { min: 1, max: 200 } },
+    { id: SETTING_IDS.insertOnTab, name: "Insert with Tab", type: "boolean", defaultValue: true },
+    { id: SETTING_IDS.insertOnEnter, name: "Insert with Enter", type: "boolean", defaultValue: false },
+    { id: SETTING_IDS.replaceUnderscores, name: "Insert spaces instead of underscores", type: "boolean", defaultValue: false },
+    { id: SETTING_IDS.showPostCount, name: "Show post counts", type: "boolean", defaultValue: true },
+    { id: SETTING_IDS.categoryFilter, name: "Category to show", type: "combo", defaultValue: "all", options: ["all", ...Object.keys(CATEGORY_CHOICES)] },
+    { id: SETTING_IDS.forceEnable, name: "Enable alongside another autocomplete", type: "boolean", defaultValue: false },
+  ],
+  init() {
+    const STRING = ComfyWidgets.STRING;
+    ComfyWidgets.STRING = function (node, inputName, inputData) {
+      const result = STRING.apply(this, arguments);
+      try {
+        if (inputData?.[1]?.multiline) {
+          attach(result?.widget);
+        }
+      } catch (error) {
+        warn("could not attach to a prompt field", error);
+      }
+      return result;
+    };
+  },
+  async setup() {
+    try {
+      if (otherAutocompletePresent() && !setting(SETTING_IDS.forceEnable, false)) {
+        console.info(`[${EXTENSION_NAME}] another autocomplete extension is active; staying off`);
+        return;
+      }
+      index = await loadIndex();
+      ready = true;
+      observeTextareas();
+    } catch (error) {
+      warn("tag database unavailable; suggestions are off", error);
+      showBanner(`Danbooru tag autocomplete is unavailable: ${error.message}`);
+    }
+  },
+});
+```
+
+- [ ] **Step 2: Verify it parses and every relative import resolves**
+
+Run: `node --check web/dtautocomplete.js`
+Expected: no output
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add web/dtautocomplete.js
+git commit -m "Add autocomplete extension entry point"
+```
+
+---
+
+### Task 6: Asset guard and the manual checklist
+
+**Files:**
+- Create: `tests/test_web_assets.mjs`
+- Modify: `README.md`
+
+**Interfaces:**
+- Consumes: every file under `web/`
+- Produces: nothing new; this task is the guard for the previous five and the documentation of what only a browser can verify
+
+**Why this shape.** ComfyUI loads every `web/**/*.js` file as an extension module, so a
+syntax error or a mistyped relative import in any of them is a real failure that no other test
+catches — the DOM-free modules are covered by Node tests, and the DOM ones cannot be exercised
+without a browser. A static guard catches the realistic failure cheaply.
+
+The browser behaviour itself is verified by the checklist below, which is the spec's own
+approach for the frontend.
+
+- [ ] **Step 1: Write `tests/test_web_assets.mjs`**
+
+```javascript
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const WEB = join(REPO_ROOT, "web");
+
+function webModules() {
+  return readdirSync(WEB).filter((name) => name.endsWith(".js")).sort();
+}
+
+test("every browser module parses", () => {
+  const modules = webModules();
+  assert.ok(modules.length >= 5, `expected the browser modules, found ${modules.length}`);
+  for (const name of modules) {
+    execFileSync(process.execPath, ["--check", join(WEB, name)], { stdio: "pipe" });
+  }
+});
+
+test("every relative import resolves to a file that exists", () => {
+  for (const name of webModules()) {
+    const source = readFileSync(join(WEB, name), "utf8");
+    for (const match of source.matchAll(/from\s+"(\.[^"]+)"/g)) {
+      const target = resolve(WEB, match[1]);
+      assert.ok(existsSync(target), `${name} imports ${match[1]}, which does not exist`);
+    }
+  }
+});
+
+test("only the entry point registers an extension", () => {
+  for (const name of webModules()) {
+    const source = readFileSync(join(WEB, name), "utf8");
+    assert.equal(
+      source.includes("app.registerExtension"),
+      name === "dtautocomplete.js",
+      `${name} should ${name === "dtautocomplete.js" ? "" : "not "}register an extension`,
+    );
+  }
+});
+```
+
+- [ ] **Step 2: Run it to verify it passes**
+
+Run: `node --test tests/test_web_assets.mjs`
+Expected: PASS (3 tests)
+
+- [ ] **Step 3: Append the manual checklist to `README.md`**
+
+```markdown
+## Browser checklist
+
+The browser behaviour is verified by hand, as the design specifies. Run ComfyUI, add a
+`CLIPTextEncode` node, and walk these in order.
+
+- Typing `1girl, blue_h` in the positive prompt shows a list starting `blue_hair`, then
+  `blue_hairband`.
+- The list shows a category badge, a post count, and `← alias` for alias matches.
+- `↑`/`↓` move the highlight and wrap at the ends; `PageUp`/`PageDown` jump ten rows.
+- `Tab` inserts the highlighted tag; `Escape` closes the list; with `Enter` insertion left off
+  (the default), `Enter` adds a newline and leaves the list open.
+- Accepting `blue_hair` writes `1girl, blue_hair, ` and puts the caret after the new separator.
+- Accepting inside `1girl, blue_h, solo` leaves the existing comma and spacing alone.
+- The negative prompt field, and any other node with a multiline string input, behaves the same.
+- Two `CLIPTextEncode` nodes can be used one after the other with no cross-talk.
+- Typing a plain sentence with no matches leaves the field exactly as before: no interception,
+  no swallowed keys, no flicker.
+- With Nodes 2.0 (`Modern Node Design`) enabled, the same checks pass.
+- With `DanbooruTagAutocomplete.Enabled` off, no list ever appears.
+- With another autocomplete extension active, this one stays off and logs why; turning on
+  `ForceEnableWithOtherAutocomplete` makes it appear.
+- Deleting `user/danbooru-tag-autocomplete/` and reloading downloads it again and then works.
+- With the download blocked (offline), a dismissible banner explains why and typing still works.
+- A `user/danbooru-tag-autocomplete/custom_tags.csv` with `my_tag,general,0,` and
+  `my_old,general,0,my_tag` makes `my_old` suggest `my_tag`.
+
+## Custom tags
+
+Put a `custom_tags.csv` in `user/danbooru-tag-autocomplete/`. A row whose last column is empty
+declares a tag; a row whose last column holds names declares the row's name as an alias of the
+first of them, so `my_old,general,0,my_tag` means typing `my_old` suggests `my_tag`. A JSON
+file with the same shape is accepted instead. Custom entries win over the downloaded database.
+```
+
+- [ ] **Step 4: Run everything**
+
+Run:
+```bash
+node --test tests/test_insert_js.mjs tests/test_keys_js.mjs tests/test_web_assets.mjs tests/test_search_js.mjs
+.venv/bin/python -m pytest -q
+```
+Expected: Node PASS (11 + 10 + 3 + 9), pytest PASS (156)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tests/test_web_assets.mjs README.md
+git commit -m "Add browser asset guard and checklist"
+```
+
+---
+
+## M2b completion criteria
+
+- `node --test tests/test_insert_js.mjs tests/test_keys_js.mjs tests/test_web_assets.mjs tests/test_search_js.mjs`
+  passes.
+- `.venv/bin/python -m pytest -q` still passes (M2a's 156 tests).
+- Every `web/*.js` parses, every relative import resolves, and only `dtautocomplete.js`
+  registers an extension.
+- The manual checklist in `README.md` is written and ready to walk.
+- No file outside `custom_nodes/ComfyUI-Danbooru-Tag-Autocomplete` was modified.
+
+## After M2b
+
+- **The checklist is the gate.** Walking it needs a running ComfyUI; the controller or the
+  human partner runs it, and any failure becomes its own task.
+- **M3** then publishes the release asset that makes the real database download path live, and
+  its workflow must run `pytest` after the build so the real-artifact validation and latency
+  gates execute. M2b's `I4`-equivalent question — whether the distributed one-character gate
+  holds on a CI runner — is answered there.
+
