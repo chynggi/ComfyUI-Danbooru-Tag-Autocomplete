@@ -103,29 +103,36 @@ shape testable, and is what lets the workflow's change detection be a `git diff`
 Append to `tests/test_build.py`:
 
 ```python
+LATEST_SHA = "d4" * 32
+
 LATEST_METADATA = {
     "data_version": "2026.09.22",
     "profile": "danbooru",
-    "artifact": {"sha256": "d4" * 32, "size": 2315906},
+    "artifact": {"sha256": LATEST_SHA, "size": 2315906},
 }
 
 
 def test_write_latest_records_the_release_pointer(tmp_path):
     path = write_latest(LATEST_METADATA, tmp_path / "latest.json", "owner/name")
 
-    assert json.loads(path.read_text(encoding="utf-8")) == {
-        "data_version": "2026.09.22",
-        "profile": "danbooru",
-        "sha256": "d4" * 32,
-        "size": 2315906,
-        "url": "https://github.com/owner/name/releases/download/data-2026.09.22/tags.bin.gz",
-    }
-    assert path.read_bytes().endswith(b"\n")
+    # The exact serialization, not only the parsed value. The update workflow decides whether to
+    # publish by diffing this file, so the key order and the indentation are part of the contract:
+    # a reorder that leaves the parsed value identical would still make every build look changed.
+    expected = "\n".join([
+        "{",
+        '  "data_version": "2026.09.22",',
+        '  "profile": "danbooru",',
+        f'  "sha256": "{LATEST_SHA}",',
+        '  "size": 2315906,',
+        '  "url": "https://github.com/owner/name/releases/download/data-2026.09.22/tags.bin.gz"',
+        "}",
+        "",
+    ])
+    assert path.read_text(encoding="utf-8") == expected
 
 
 def test_write_latest_is_byte_identical_for_the_same_build(tmp_path):
-    # The update workflow decides whether to publish by diffing this file, so the same build has to
-    # produce the same bytes.
+    # The same build has to produce the same bytes even if one value becomes nondeterministic.
     first = write_latest(LATEST_METADATA, tmp_path / "a.json", "owner/name").read_bytes()
     second = write_latest(LATEST_METADATA, tmp_path / "b.json", "owner/name").read_bytes()
 
@@ -156,10 +163,32 @@ def test_main_writes_the_latest_pointer(tmp_path, monkeypatch):
     metadata = json.loads((out / "metadata.json").read_text(encoding="utf-8"))
     payload = json.loads(latest.read_text(encoding="utf-8"))
     assert payload["data_version"] == metadata["data_version"]
+    assert payload["profile"] == metadata["profile"]
     assert payload["sha256"] == metadata["artifact"]["sha256"]
+    assert payload["size"] == metadata["artifact"]["size"]
     assert payload["url"] == (
         f"https://github.com/owner/name/releases/download/data-{payload['data_version']}/tags.bin.gz"
     )
+```
+
+Also extend the existing `test_main_removes_outputs_when_validation_fails` so it passes the pointer
+flags and proves the invariant that the write happens on the success path only. Change its `main`
+invocation and its assertions:
+
+```python
+    out = tmp_path / "generated"
+    latest = tmp_path / "data" / "latest.json"
+    code = build_database.main([
+        "--profile", str(FIXTURE_PROFILE),
+        "--out", str(out),
+        "--latest-json", str(latest),
+        "--repo-slug", "owner/name",
+    ])
+
+    assert code == 1
+    assert not (out / "tags.bin.gz").exists()
+    assert not (out / "metadata.json").exists()
+    assert not latest.exists()
 ```
 
 Add `write_latest` to the existing import from `build.build_database` at the top of the file.
@@ -177,8 +206,9 @@ Add after `write_artifacts` in `build/build_database.py`:
 def write_latest(metadata: dict, path: Path, repo_slug: str) -> Path:
     """Write the committed pointer the runtime reads to find the current artifact.
 
-    Every value comes from the build, so an unchanged upstream produces a byte-identical file,
-    which is what lets the update workflow decide whether to publish with a plain git diff.
+    Every value comes from the build, and the keys are written in the order the committed
+    `data/latest.json` uses, because that is what the update workflow diffs to decide whether to
+    publish: a reorder would leave the parsed value identical while making every build look changed.
     """
     version = metadata["data_version"]
     payload = {
@@ -200,12 +230,17 @@ In `main`, after the two `add_argument` calls for `--out` and `--data-version`:
     parser.add_argument("--repo-slug", default=None, help="owner/name used to build the release URL")
 ```
 
-and immediately after the validation block's `return 1` (so the pointer is written only on success):
+and immediately after `args = parser.parse_args(argv)`, so a forgotten flag fails before a full build:
+
+```python
+    if args.latest_json and not args.repo_slug:
+        parser.error("--latest-json needs --repo-slug")
+```
+
+Then, immediately after the validation block's `return 1`, so the pointer is written only on success:
 
 ```python
     if args.latest_json:
-        if not args.repo_slug:
-            parser.error("--latest-json needs --repo-slug")
         write_latest(metadata, Path(args.latest_json), args.repo_slug)
 ```
 
@@ -247,7 +282,7 @@ job, and doing it manually would leave the two describing different artifacts.
 
 ```bash
 git add build/build_database.py tests/test_build.py
-git commit -m "Write the data pointer from the build"
+git commit -m "Update the build to write the data pointer"
 ```
 
 ---
