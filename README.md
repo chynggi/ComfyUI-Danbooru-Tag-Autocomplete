@@ -6,6 +6,7 @@ one.
 
 - Design: `docs/specs/2026-09-22-tag-autocomplete-design.md`
 - Plans: `docs/plans/`
+- What is left: `docs/next-steps.md`
 
 ## Install
 
