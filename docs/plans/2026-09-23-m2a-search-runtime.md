@@ -303,10 +303,11 @@ class TagIndex:
         return sorted(merged.values(), key=_hit_sort_key)[:limit]
 ```
 
-Add this test to `tests/test_search.py` alongside the one in Step 1:
-
 The old `_collect` method is now unused — delete it.
 
+Add this test to `tests/test_search.py` alongside the one in Step 1:
+
+```python
 def test_custom_override_keeps_a_deeper_main_candidate_when_it_ranks_lower():
     main = Artifact.from_tagset(TagSet(
         threshold=0,
