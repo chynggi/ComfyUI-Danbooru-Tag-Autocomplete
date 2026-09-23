@@ -38,7 +38,7 @@ const MIRROR_PROPERTIES = [
   "MozTabSize",
 ];
 
-function createMirror(textarea) {
+function createMirror() {
   const mirror = document.createElement("div");
   mirror.setAttribute("aria-hidden", "true");
   const style = mirror.style;
@@ -58,7 +58,7 @@ const mirrors = new WeakMap();
 export function mirrorFor(textarea) {
   let mirror = mirrors.get(textarea);
   if (mirror === undefined || !mirror.isConnected) {
-    mirror = createMirror(textarea);
+    mirror = createMirror();
     mirrors.set(textarea, mirror);
   }
   return mirror;
@@ -99,5 +99,9 @@ export function caretCoordinates(textarea, position) {
     height: parseInt(mirror.style.lineHeight, 10) || marker.offsetHeight,
   };
   marker.remove();
+  // A mirror is a permanent child of body, and a textarea the user deletes cannot take its
+  // mirror with it. Clear the text so an abandoned mirror keeps no copy of the prompt; the
+  // styles are recomputed on every call, so nothing is lost by clearing it here.
+  mirror.textContent = "";
   return coordinates;
 }
