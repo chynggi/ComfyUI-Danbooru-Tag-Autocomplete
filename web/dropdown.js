@@ -42,6 +42,7 @@ export class TagDropdown {
     this.onAccept = onAccept;
     this.hits = [];
     this.index = -1;
+    this.showPostCount = true;
 
     this.element = document.createElement("div");
     this.element.className = "dtautocomplete";

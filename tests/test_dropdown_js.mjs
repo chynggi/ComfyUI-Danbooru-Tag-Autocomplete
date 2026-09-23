@@ -2,10 +2,10 @@
 // highlighted, and which hit an accept reports.
 //
 // The DOM here is a hand-written stub, not a browser. It is faithful for the parts TagDropdown
-// actually uses — an element tree with `children`, `classList.toggle`, `textContent` and event
-// listeners — and deliberately fake for layout: every metric is zero. So this file pins the
-// behaviour and the wiring, and the geometry and visual placement stay on the manual checklist
-// in README.md, which is where the design puts them.
+// actually uses — an element tree with `children`, `classList` transition recording,
+// `textContent` and event listeners — and deliberately fake for layout: every metric is zero, so
+// nothing about size, position or the textarea's own geometry is verified here. The stub is also
+// fake for anything the module never does to an element, such as removing one.
 //
 // The stub exists because the project takes no npm dependencies, so there is no jsdom to drive a
 // real textarea. A stub that cannot lay anything out is still enough to catch the failure this
@@ -41,7 +41,19 @@ function makeNode(tagName) {
     addEventListener(type, handler) {
       (node.listeners[type] ??= []).push(handler);
     },
-    classList: { toggle() {} },
+    classList: {
+      classes: new Set(),
+      toggle(name, on) {
+        if (on) {
+          node.classList.classes.add(name);
+        } else {
+          node.classList.classes.delete(name);
+        }
+      },
+      contains(name) {
+        return node.classList.classes.has(name);
+      },
+    },
     scrollIntoView() {},
     fire(type, event = {}) {
       for (const handler of node.listeners[type] ?? []) {
@@ -190,6 +202,31 @@ test("showPostCount controls the post-count cell", () => {
   assert.equal(dropdown.element.children[0].children.length, 2);
   dropdown.show(HITS, { showPostCount: true });
   assert.equal(dropdown.element.children[0].children.length, 3);
+});
+
+test("only the highlighted row is marked active", () => {
+  const { dropdown } = makeDropdown();
+  dropdown.show(HITS);
+  assert.equal(dropdown.element.children[0].classList.contains("dtautocomplete-row-active"), true);
+  assert.equal(dropdown.element.children[1].classList.contains("dtautocomplete-row-active"), false);
+  dropdown.handleKey({ key: "ArrowDown" }, OPEN);
+  assert.equal(dropdown.element.children[0].classList.contains("dtautocomplete-row-active"), false);
+  assert.equal(dropdown.element.children[1].classList.contains("dtautocomplete-row-active"), true);
+});
+
+test("hovering a row highlights that row", () => {
+  const { dropdown } = makeDropdown();
+  dropdown.show(HITS);
+  dropdown.element.children[2].fire("mouseenter");
+  assert.equal(dropdown.index, 2);
+  assert.equal(dropdown.element.children[2].classList.contains("dtautocomplete-row-active"), true);
+});
+
+test("accepting with nothing highlighted reports nothing", () => {
+  const { dropdown, accepted } = makeDropdown();
+  dropdown.show([]);
+  dropdown.accept();
+  assert.deepEqual(accepted, []);
 });
 
 test("formatPostCount rounds at its boundaries", () => {
