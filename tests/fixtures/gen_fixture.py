@@ -20,20 +20,29 @@ from artifact import TagEntry, TagIndex, TagSet, decode, encode  # noqa: E402
 
 TAGSET = TagSet(
     threshold=25,
-    tags=(
-        TagEntry("1girl", 0, 5000, False),
-        TagEntry("blue_hair", 0, 1200, False),
-        TagEntry("blue_hair_ornament", 0, 30, False),
-        TagEntry("blue_hairband", 0, 82, False),
-        TagEntry("hatsune_miku", 4, 900, False),
-        TagEntry("highres", 5, 700, False),
-        TagEntry("old_tag", 0, 10, True),
-    ),
+    tags=tuple(sorted(
+        (
+            TagEntry("1girl", 0, 5000, False),
+            TagEntry("blue_hair", 0, 1200, False),
+            TagEntry("blue_hair_ornament", 0, 30, False),
+            TagEntry("blue_hairband", 0, 82, False),
+            TagEntry("hatsune_miku", 4, 900, False),
+            TagEntry("highres", 5, 700, False),
+            TagEntry("old_tag", 0, 10, True),
+            # Two names that tie on rank, UTF-8 byte length and post_count, so the final
+            # name tie-break decides between them. JavaScript compares UTF-16 code units
+            # and would order them the other way round; see compareCodePoints in
+            # web/search.js.
+            TagEntry("x\ue000x", 0, 7, False),
+            TagEntry("x\U00010000", 0, 7, False),
+        ),
+        key=lambda entry: entry.name.encode("utf-8"),
+    )),
     aliases=("blu_hair", "miku", "oldtag"),
     alias_target=(1, 4, 4),
 )
 
-QUERIES = ["blue_h", "blue_hair", "blu_h", "miku", "old_tag", "high", "zzz", ""]
+QUERIES = ["blue_h", "blue_hair", "blu_h", "miku", "old_tag", "high", "x", "zzz", ""]
 
 # An overlay that replaces a main tag with an entry ranking below the one it displaces,
 # which is the case a bounded per-source window gets wrong if it is not over-selected.

@@ -149,18 +149,40 @@ function startsWith(bytes, start, end, key) {
   return true;
 }
 
-function hitSortKey(hit) {
-  return [hit.rank, hit.rank === RANK_NAME_PREFIX ? hit.nameLength : 0, -hit.postCount, hit.name];
+function compareCodePoints(left, right) {
+  // Python compares str by code point, and UTF-8 byte order agrees with code-point order.
+  // JavaScript compares by UTF-16 code unit, which sorts astral characters before BMP
+  // characters above U+E000, so compare code points explicitly.
+  let leftIndex = 0;
+  let rightIndex = 0;
+  while (leftIndex < left.length && rightIndex < right.length) {
+    const leftPoint = left.codePointAt(leftIndex);
+    const rightPoint = right.codePointAt(rightIndex);
+    if (leftPoint !== rightPoint) {
+      return leftPoint < rightPoint ? -1 : 1;
+    }
+    leftIndex += leftPoint > 0xffff ? 2 : 1;
+    rightIndex += rightPoint > 0xffff ? 2 : 1;
+  }
+  if (leftIndex >= left.length && rightIndex >= right.length) {
+    return 0;
+  }
+  return leftIndex >= left.length ? -1 : 1;
 }
 
 function compareHits(left, right) {
-  const a = hitSortKey(left);
-  const b = hitSortKey(right);
-  for (let index = 0; index < a.length; index += 1) {
-    if (a[index] < b[index]) return -1;
-    if (a[index] > b[index]) return 1;
+  if (left.rank !== right.rank) {
+    return left.rank < right.rank ? -1 : 1;
   }
-  return 0;
+  const leftLength = left.rank === RANK_NAME_PREFIX ? left.nameLength : 0;
+  const rightLength = right.rank === RANK_NAME_PREFIX ? right.nameLength : 0;
+  if (leftLength !== rightLength) {
+    return leftLength < rightLength ? -1 : 1;
+  }
+  if (left.postCount !== right.postCount) {
+    return left.postCount > right.postCount ? -1 : 1;
+  }
+  return compareCodePoints(left.name, right.name);
 }
 
 export class TagIndex {

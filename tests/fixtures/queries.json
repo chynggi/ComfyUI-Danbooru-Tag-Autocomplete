@@ -93,6 +93,26 @@
         "nameLength": 7
       }
     ],
+    "x": [
+      {
+        "name": "x\ue000x",
+        "category": 0,
+        "postCount": 7,
+        "deprecated": false,
+        "alias": null,
+        "rank": 1,
+        "nameLength": 5
+      },
+      {
+        "name": "x\ud800\udc00",
+        "category": 0,
+        "postCount": 7,
+        "deprecated": false,
+        "alias": null,
+        "rank": 1,
+        "nameLength": 5
+      }
+    ],
     "zzz": [],
     "": []
   },

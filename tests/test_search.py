@@ -224,3 +224,8 @@ def test_shared_fixture_overlay_matches_python_search():
             for hit in index.search(query, limit=overlay["limit"])
         ]
         assert actual == hits, query
+
+
+def test_astral_names_tie_break_by_code_point_not_utf16_unit():
+    index = TagIndex(artifact.decode((FIXTURES / "artifact.bin").read_bytes()))
+    assert [hit.name for hit in index.search("x")] == ["x\ue000x", "x\U00010000"]

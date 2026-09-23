@@ -74,3 +74,8 @@ test("overlay results match the Python fixture", () => {
     assert.deepEqual(index.search(query, { limit: overlay.limit }).map(project), hits, `query ${JSON.stringify(query)}`);
   }
 });
+
+test("astral names tie-break by code point, not UTF-16 code unit", () => {
+  const index = new TagIndex(decodeArtifact(artifactBuffer));
+  assert.deepEqual(index.search("x").map((hit) => hit.name), ["x\ue000x", "x\u{10000}"]);
+});
