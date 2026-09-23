@@ -544,7 +544,7 @@ const MIRROR_PROPERTIES = [
   "MozTabSize",
 ];
 
-function createMirror(textarea) {
+function createMirror() {
   const mirror = document.createElement("div");
   mirror.setAttribute("aria-hidden", "true");
   const style = mirror.style;
@@ -564,7 +564,7 @@ const mirrors = new WeakMap();
 export function mirrorFor(textarea) {
   let mirror = mirrors.get(textarea);
   if (mirror === undefined || !mirror.isConnected) {
-    mirror = createMirror(textarea);
+    mirror = createMirror();
     mirrors.set(textarea, mirror);
   }
   return mirror;
@@ -605,6 +605,10 @@ export function caretCoordinates(textarea, position) {
     height: parseInt(mirror.style.lineHeight, 10) || marker.offsetHeight,
   };
   marker.remove();
+  // A mirror is a permanent child of body, and a textarea the user deletes cannot take its
+  // mirror with it. Clear the text so an abandoned mirror keeps no copy of the prompt; the
+  // styles are recomputed on every call, so nothing is lost by clearing it here.
+  mirror.textContent = "";
   return coordinates;
 }
 ```
@@ -748,6 +752,10 @@ export class TagDropdown {
 
   hide() {
     this.element.hidden = true;
+    // Drop the rendered rows as well as hiding them: this element is a permanent child of body,
+    // so a dropdown whose textarea is later deleted would otherwise keep the last tag list alive.
+    // show() renders from scratch, so clearing here costs nothing.
+    this.element.replaceChildren();
     this.hits = [];
     this.index = -1;
   }
@@ -1286,6 +1294,11 @@ The browser behaviour is verified by hand, as the design specifies. Run ComfyUI,
   (the default), `Enter` adds a newline and leaves the list open.
 - Accepting `blue_hair` writes `1girl, blue_hair, ` and puts the caret after the new separator.
 - Accepting inside `1girl, blue_h, solo` leaves the existing comma and spacing alone.
+- With a long prompt that wraps, the list appears at the caret on the **first** line of the
+  paragraph and on the **last** line, not at the field's top-left or at a fixed offset.
+- After scrolling inside a tall prompt field so the caret is no longer on the visible first line,
+  the list still appears beside the caret.
+- After scrolling the page itself, the list still appears beside the caret.
 - The negative prompt field, and any other node with a multiline string input, behaves the same.
 - Two `CLIPTextEncode` nodes can be used one after the other with no cross-talk.
 - Typing a plain sentence with no matches leaves the field exactly as before: no interception,
