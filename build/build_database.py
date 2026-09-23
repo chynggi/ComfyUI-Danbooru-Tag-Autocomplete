@@ -208,13 +208,37 @@ def write_artifacts(
     return metadata
 
 
+def write_latest(metadata: dict, path: Path, repo_slug: str) -> Path:
+    """Write the committed pointer the runtime reads to find the current artifact.
+
+    Every value comes from the build, and the keys are written in the order the committed
+    `data/latest.json` uses, because that is what the update workflow diffs to decide whether to
+    publish: a reorder would leave the parsed value identical while making every build look changed.
+    """
+    version = metadata["data_version"]
+    payload = {
+        "data_version": version,
+        "profile": metadata["profile"],
+        "sha256": metadata["artifact"]["sha256"],
+        "size": metadata["artifact"]["size"],
+        "url": f"https://github.com/{repo_slug}/releases/download/data-{version}/tags.bin.gz",
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build the runtime tag artifact")
     parser.add_argument("--profile", default="profiles/danbooru.yaml")
     parser.add_argument("--cache", default="data/raw")
     parser.add_argument("--out", default="generated")
     parser.add_argument("--data-version", default=None)
+    parser.add_argument("--latest-json", default=None, help="also write the committed data pointer here")
+    parser.add_argument("--repo-slug", default=None, help="owner/name used to build the release URL")
     args = parser.parse_args(argv)
+    if args.latest_json and not args.repo_slug:
+        parser.error("--latest-json needs --repo-slug")
 
     profile = load_profile(Path(args.profile))
     source_names = list(SOURCE_ORDER) + [name for name in profile.extra_sources if name not in SOURCE_ORDER]
@@ -241,6 +265,8 @@ def main(argv: list[str] | None = None) -> int:
         for error in errors:
             print(f"error: {error}")
         return 1
+    if args.latest_json:
+        write_latest(metadata, Path(args.latest_json), args.repo_slug)
     print(json.dumps(stats, indent=2))
     print(f"data_version={metadata['data_version']} sha256={metadata['artifact']['sha256']}")
     return 0

@@ -4,7 +4,7 @@ import json
 import pytest
 
 from artifact import decode, encode, normalize_tag
-from build.build_database import Profile, assemble, load_profile, merge_sources, resolve_aliases, write_artifacts
+from build.build_database import Profile, assemble, load_profile, merge_sources, resolve_aliases, write_artifacts, write_latest
 from build.sources.base import SourceData, TagRecord
 
 FIXTURE_PROFILE = "profiles/danbooru.yaml"
@@ -196,8 +196,83 @@ def test_main_removes_outputs_when_validation_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(build_database, "validate", lambda artifact, metadata: ["synthetic failure"])
 
     out = tmp_path / "generated"
-    code = build_database.main(["--profile", str(FIXTURE_PROFILE), "--out", str(out)])
+    latest = tmp_path / "data" / "latest.json"
+    code = build_database.main([
+        "--profile", str(FIXTURE_PROFILE),
+        "--out", str(out),
+        "--latest-json", str(latest),
+        "--repo-slug", "owner/name",
+    ])
 
     assert code == 1
     assert not (out / "tags.bin.gz").exists()
     assert not (out / "metadata.json").exists()
+    assert not latest.exists()
+
+
+LATEST_SHA = "d4" * 32
+
+LATEST_METADATA = {
+    "data_version": "2026.09.22",
+    "profile": "danbooru",
+    "artifact": {"sha256": LATEST_SHA, "size": 2315906},
+}
+
+
+def test_write_latest_records_the_release_pointer(tmp_path):
+    path = write_latest(LATEST_METADATA, tmp_path / "latest.json", "owner/name")
+
+    # The exact serialization, not only the parsed value. The update workflow decides whether to
+    # publish by diffing this file, so the key order and the indentation are part of the contract:
+    # a reorder that leaves the parsed value identical would still make every build look changed.
+    expected = "\n".join([
+        "{",
+        '  "data_version": "2026.09.22",',
+        '  "profile": "danbooru",',
+        f'  "sha256": "{LATEST_SHA}",',
+        '  "size": 2315906,',
+        '  "url": "https://github.com/owner/name/releases/download/data-2026.09.22/tags.bin.gz"',
+        "}",
+        "",
+    ])
+    assert path.read_text(encoding="utf-8") == expected
+
+
+def test_write_latest_is_byte_identical_for_the_same_build(tmp_path):
+    # The same build has to produce the same bytes even if one value becomes nondeterministic.
+    first = write_latest(LATEST_METADATA, tmp_path / "a.json", "owner/name").read_bytes()
+    second = write_latest(LATEST_METADATA, tmp_path / "b.json", "owner/name").read_bytes()
+
+    assert first == second
+
+
+def test_main_writes_the_latest_pointer(tmp_path, monkeypatch):
+    from build import build_database
+
+    class StubSource:
+        def read(self, fetched):
+            return hlibr_data()
+
+    monkeypatch.setattr(build_database, "fetch_all", lambda names, cache: [object()])
+    monkeypatch.setattr(build_database, "SOURCE_ORDER", ("hlibr",))
+    monkeypatch.setattr(build_database, "SOURCES", {"hlibr": StubSource})
+
+    out = tmp_path / "generated"
+    latest = tmp_path / "data" / "latest.json"
+    code = build_database.main([
+        "--profile", str(FIXTURE_PROFILE),
+        "--out", str(out),
+        "--latest-json", str(latest),
+        "--repo-slug", "owner/name",
+    ])
+
+    assert code == 0
+    metadata = json.loads((out / "metadata.json").read_text(encoding="utf-8"))
+    payload = json.loads(latest.read_text(encoding="utf-8"))
+    assert payload["data_version"] == metadata["data_version"]
+    assert payload["profile"] == metadata["profile"]
+    assert payload["sha256"] == metadata["artifact"]["sha256"]
+    assert payload["size"] == metadata["artifact"]["size"]
+    assert payload["url"] == (
+        f"https://github.com/owner/name/releases/download/data-{payload['data_version']}/tags.bin.gz"
+    )
