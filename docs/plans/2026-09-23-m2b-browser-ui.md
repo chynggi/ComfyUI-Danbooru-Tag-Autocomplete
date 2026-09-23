@@ -1689,7 +1689,7 @@ it, because Task 5's failure routing sends a `/db` 404 to the quiet path so the 
 nothing at all, and because the fix is three lines with a test. Deferring it would mean shipping a
 checklist line whose behaviour is broken.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
 Append to `tests/test_store.py`:
 
@@ -1705,12 +1705,28 @@ def test_status_reports_missing_when_a_ready_cache_is_deleted(store):
     (store.cache_dir() / "tags.bin.gz").unlink()
 
     assert store.status().state == store.STATE_MISSING
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
+def test_status_never_raises_when_the_cache_is_unreadable(store):
+    # Path.exists() re-raises EACCES, so probing an unreadable cache would otherwise make
+    # status() raise and the status route answer 500. An unreadable cache is not a ready one.
+    build_artifact(store.cache_dir())
+    store._state = store.STATE_READY
+    os.chmod(store.cache_dir(), 0o000)
+    try:
+        assert store.status().state == store.STATE_MISSING
+        store.ensure_download()  # must not raise either
+    finally:
+        os.chmod(store.cache_dir(), 0o755)
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+`os` needs importing at the top of `tests/test_store.py`, alongside the imports already there.
 
-Run: `.venv/bin/python -m pytest tests/test_store.py -q -k ready_cache_is_deleted`
-Expected: FAIL, `assert 'ready' == 'missing'`
+- [ ] **Step 2: Run them to verify they fail**
+
+Run: `.venv/bin/python -m pytest tests/test_store.py -q -k "ready_cache_is_deleted or unreadable"`
+Expected: FAIL, `assert 'ready' == 'missing'` for the first, and `PermissionError` for the second
 
 - [ ] **Step 3: Fix `store.py`**
 
@@ -1732,14 +1748,42 @@ def status() -> Status:
 ```
 
 The existence check is computed before the lock and the decision is made inside it, which is what
-the original did too; `_data_version()` was already called under the lock. Nothing else changes: files present and not downloading is still
+the original did too; `_data_version()` was already called under the lock.
+
+**Also in this commit, after Task 7's review.** `Path.exists()` re-raises `EACCES` on the runtime
+this project targets — measured on the project's own interpreter, Python 3.13.15, where
+`Path('…/chmod-000-dir/file').exists()` raises `PermissionError`, while `os.path.exists()` returns
+False. So an unreadable cache directory makes `status()` raise, which contradicts its "Never
+raises" docstring and makes the status route answer 500 — and a failed `/status` sends the
+frontend down the same quiet path as the bug above, so the user sees nothing. `ensure_download()`
+probes the same two paths and raises the same way, and the route calls it immediately after a
+`MISSING` status, so both call sites need the same treatment. Add one helper and use it in each:
+
+```python
+def _cache_present() -> bool:
+    """Whether both cache files are readable. An unreadable cache counts as absent so callers
+    can recover: `Path.exists` re-raises EACCES rather than reporting absence."""
+    try:
+        return artifact_path().exists() and metadata_path().exists()
+    except OSError:
+        return False
+```
+
+Then `status` uses `ready = _cache_present()` and `ensure_download` uses `ready = _cache_present()`
+in place of its own two-path probe. Nothing else changes.
+
+This is a pre-existing defect, not one this task introduced — the old `status` probed the same way
+— but it produces the same silent failure this task exists to remove, and both call sites are in
+the file already being changed, so it is fixed here rather than filed for later.
+
+Nothing else changes: files present and not downloading is still
 `READY` whether or not a download is in flight, and a failed download is still `ERROR` and is still
 not retried automatically.
 
 - [ ] **Step 4: Run the suite**
 
 Run: `.venv/bin/python -m pytest -q`
-Expected: PASS (157 tests)
+Expected: PASS (158 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -1754,7 +1798,7 @@ git commit -m "Recover when the cached artifact is deleted"
 
 - `node --test tests/test_insert_js.mjs tests/test_keys_js.mjs tests/test_dropdown_js.mjs tests/test_web_assets.mjs tests/test_search_js.mjs`
   passes.
-- `.venv/bin/python -m pytest -q` passes, including the one test Task 7 adds (157 tests).
+- `.venv/bin/python -m pytest -q` passes, including the two tests Task 7 adds (158 tests).
 - Every `web/*.js` parses, every relative import resolves, and only `dtautocomplete.js`
   registers an extension.
 - The manual checklist in `README.md` is written and ready to walk.
