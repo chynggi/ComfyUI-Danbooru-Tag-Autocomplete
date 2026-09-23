@@ -161,8 +161,8 @@ def test_custom_entries_still_replace_main_entries_under_bounded_selection():
 
 - [ ] **Step 2: Run the tests to verify they fail for the right reason**
 
-Run: `.venv/bin/python -m pytest tests/test_search.py -v -k "short_prefix or category_filter_selects or deprecated_filter or name_length or custom_entries_still"`
-Expected: three failures — `test_category_filter_selects_from_below_the_unfiltered_top_k` and `test_deprecated_filter_selects_from_below_the_unfiltered_top_k` must fail because the result contains filtered-out names (not because of an import error), and `test_name_length_is_the_byte_length_not_the_character_length` must fail with `AttributeError: 'SearchHit' object has no attribute 'name_length'`. If the category test passes before Step 3, the test is not exercising the defect — report that.
+Run: `.venv/bin/python -m pytest tests/test_search.py -v -k "short_prefix or category_filter_selects or deprecated_filter or name_length or custom_entries_still or custom_override"`
+Expected: `test_name_length_is_the_byte_length_not_the_character_length` must fail with `AttributeError: 'SearchHit' object has no attribute 'name_length'`, and `test_custom_override_keeps_a_deeper_main_candidate_when_it_ranks_lower` must fail because the answer is `c0000, c0001`. The two filter tests are expected to **pass** already — the pre-change code filtered before inserting into its per-name map, so they guard the new implementation rather than demonstrating a defect; report if either fails, and report if the category and deprecated tests both pass without the filter-in-generator design being present.
 
 - [ ] **Step 3: Replace the search section of `artifact.py`**
 
@@ -286,13 +286,52 @@ class TagIndex:
         if not key:
             return []
         key_bytes = key.encode("utf-8")
-        merged = self._search_source(self._main, key_bytes, limit, categories, exclude_deprecated)
-        if self._custom is not None:
-            merged.update(self._search_source(self._custom, key_bytes, limit, categories, exclude_deprecated))
+        if self._custom is None:
+            merged = self._search_source(self._main, key_bytes, limit, categories, exclude_deprecated)
+        else:
+            # The overlay wins by name even when it ranks lower than the main entry it
+            # replaces, so over-select main by the number of overlay names to keep the
+            # bounded window exact.
+            custom = self._search_source(
+                self._custom, key_bytes, self._custom.n_tags + self._custom.n_aliases,
+                categories, exclude_deprecated,
+            )
+            merged = self._search_source(
+                self._main, key_bytes, limit + len(custom), categories, exclude_deprecated
+            )
+            merged.update(custom)
         return sorted(merged.values(), key=_hit_sort_key)[:limit]
 ```
 
+Add this test to `tests/test_search.py` alongside the one in Step 1:
+
 The old `_collect` method is now unused — delete it.
+
+def test_custom_override_keeps_a_deeper_main_candidate_when_it_ranks_lower():
+    main = Artifact.from_tagset(TagSet(
+        threshold=0,
+        tags=(
+            TagEntry("c0000", 0, 100, False),
+            TagEntry("c0001", 0, 90, False),
+            TagEntry("c0002", 0, 80, False),
+        ),
+        aliases=(),
+        alias_target=(),
+    ))
+    custom = Artifact.from_tagset(TagSet(
+        threshold=0,
+        tags=(TagEntry("c0000", 4, 0, False),),
+        aliases=(),
+        alias_target=(),
+    ))
+    hits = TagIndex(main, custom=custom).search("c", limit=2)
+    assert [hit.name for hit in hits] == ["c0001", "c0002"]
+```
+
+The second test is the exactness guard for overlays: the overlay replaces `c0000` with
+an entry that ranks **below** the main entries it displaces, so a per-source `limit`
+would lose the deeper main candidate and answer `c0000, c0001` instead of the true
+`c0001, c0002`.
 
 - [ ] **Step 4: Run the search tests to verify they pass**
 
@@ -493,6 +532,10 @@ git commit -m "Bound tag search selection and gate short prefixes"
 - Create: `web/search.js`
 - Create: `web/package.json`
 - Create: `tests/test_search_js.mjs`
+- Modify: `tests/fixtures/gen_fixture.py`
+- Modify: `tests/fixtures/queries.json` (regenerated)
+- Create: `tests/fixtures/overlay-main.bin`, `tests/fixtures/overlay.bin` (generated)
+- Modify: `tests/test_search.py` (add the overlay parity test)
 
 **Interfaces:**
 - Consumes: the artifact layout from `artifact.py`, and `tests/fixtures/artifact.bin` + `tests/fixtures/queries.json`
@@ -503,6 +546,7 @@ git commit -m "Bound tag search selection and gate short prefixes"
   - `decodeArtifact(buffer: ArrayBuffer) -> ArtifactView`, where `ArtifactView` has `threshold`, `nTags`, `nAliases`, `names`, `nameOffsets`, `category`, `postCount`, `tagFlags`, `aliasNames`, `aliasOffsets`, `aliasTarget`
   - `class TagIndex { constructor(main, custom = null); search(query, { limit = 32, categories = null, excludeDeprecated = true } = {}) }` returning `[{ name, category, postCount, deprecated, alias, rank, nameLength }]`
   - `ArtifactView` helper methods `name(index) -> string`, `alias(index) -> string`
+  - the shared fixture gains `tests/fixtures/overlay-main.bin`, `tests/fixtures/overlay.bin`, and an `overlay` section in `queries.json` shaped `{"limit": int, "queries": {query: [hit, ...]}}`, so the custom-overlay path is part of the parity contract
 
 **Why a port rather than a shared runtime.** The browser cannot run Python. Parity is
 enforced by the shared fixture: Task 1 regenerated `queries.json` from the Python
@@ -860,11 +904,25 @@ export class TagIndex {
     }
     const keyBytes = new TextEncoder().encode(key);
     const merged = new Map();
-    for (const hit of this.#searchSource(this.main, keyBytes, limit, categories, excludeDeprecated)) {
-      merged.set(hit.name, hit);
-    }
-    if (this.custom !== null) {
-      for (const hit of this.#searchSource(this.custom, keyBytes, limit, categories, excludeDeprecated)) {
+    if (this.custom === null) {
+      for (const hit of this.#searchSource(this.main, keyBytes, limit, categories, excludeDeprecated)) {
+        merged.set(hit.name, hit);
+      }
+    } else {
+      // The overlay wins by name even when it ranks lower than the main entry it
+      // replaces, so over-select main by the number of overlay names to keep the
+      // bounded window exact. Keep this in step with TagIndex.search in artifact.py.
+      const custom = this.#searchSource(
+        this.custom,
+        keyBytes,
+        this.custom.nTags + this.custom.nAliases,
+        categories,
+        excludeDeprecated,
+      );
+      for (const hit of this.#searchSource(this.main, keyBytes, limit + custom.length, categories, excludeDeprecated)) {
+        merged.set(hit.name, hit);
+      }
+      for (const hit of custom) {
         merged.set(hit.name, hit);
       }
     }
@@ -878,10 +936,182 @@ export class TagIndex {
 Run: `node --test tests/test_search_js.mjs`
 Expected: PASS (`# pass 6`), output free of warnings
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Extend the shared contract with an overlay case**
+
+The fixture has no custom overlay, so the parity test would not catch a divergence in the
+overlay path — which is the path the browser actually uses once a user adds custom tags.
+Close that gap in the contract itself.
+
+Replace `tests/fixtures/gen_fixture.py` with:
+
+```python
+"""Regenerate the shared Python/JavaScript parity fixtures.
+
+Run from the repo root: .venv/bin/python tests/fixtures/gen_fixture.py
+
+Writes:
+  artifact.bin, overlay-main.bin, overlay.bin  - encoded artifacts
+  queries.json                                 - the expected results for both indexes
+
+The Node test in tests/test_search_js.mjs consumes the same files, so the two
+implementations are checked against one expected result set.
+"""
+import json
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
+
+from artifact import TagEntry, TagIndex, TagSet, decode, encode  # noqa: E402
+
+TAGSET = TagSet(
+    threshold=25,
+    tags=(
+        TagEntry("1girl", 0, 5000, False),
+        TagEntry("blue_hair", 0, 1200, False),
+        TagEntry("blue_hair_ornament", 0, 30, False),
+        TagEntry("blue_hairband", 0, 82, False),
+        TagEntry("hatsune_miku", 4, 900, False),
+        TagEntry("highres", 5, 700, False),
+        TagEntry("old_tag", 0, 10, True),
+    ),
+    aliases=("blu_hair", "miku", "oldtag"),
+    alias_target=(1, 4, 4),
+)
+
+QUERIES = ["blue_h", "blue_hair", "blu_h", "miku", "old_tag", "high", "zzz", ""]
+
+# An overlay that replaces a main tag with an entry ranking below the one it displaces,
+# which is the case a bounded per-source window gets wrong if it is not over-selected.
+OVERLAY_MAIN = TagSet(
+    threshold=0,
+    tags=(
+        TagEntry("c0", 0, 100, False),
+        TagEntry("c1", 0, 90, False),
+        TagEntry("c2", 0, 80, False),
+    ),
+    aliases=(),
+    alias_target=(),
+)
+
+OVERLAY = TagSet(
+    threshold=0,
+    tags=(TagEntry("c0", 4, 0, False),),
+    aliases=(),
+    alias_target=(),
+)
+
+OVERLAY_QUERIES = ["c"]
+OVERLAY_LIMIT = 1
+
+HERE = Path(__file__).resolve().parent
+
+
+def project(hit):
+    return {
+        "name": hit.name,
+        "category": hit.category,
+        "postCount": hit.post_count,
+        "deprecated": hit.deprecated,
+        "alias": hit.alias,
+        "rank": hit.rank,
+        "nameLength": hit.name_length,
+    }
+
+
+for filename, tagset in (("artifact.bin", TAGSET), ("overlay-main.bin", OVERLAY_MAIN), ("overlay.bin", OVERLAY)):
+    (HERE / filename).write_bytes(encode(tagset))
+
+index = TagIndex(decode((HERE / "artifact.bin").read_bytes()))
+expected = {query: [project(hit) for hit in index.search(query)] for query in QUERIES}
+
+overlay_index = TagIndex(
+    decode((HERE / "overlay-main.bin").read_bytes()),
+    custom=decode((HERE / "overlay.bin").read_bytes()),
+)
+overlay_expected = {
+    query: [project(hit) for hit in overlay_index.search(query, limit=OVERLAY_LIMIT)]
+    for query in OVERLAY_QUERIES
+}
+
+(HERE / "queries.json").write_text(
+    json.dumps(
+        {
+            "threshold": TAGSET.threshold,
+            "queries": expected,
+            "overlay": {"limit": OVERLAY_LIMIT, "queries": overlay_expected},
+        },
+        indent=2,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+print("wrote", HERE / "artifact.bin", HERE / "overlay-main.bin", HERE / "overlay.bin", "and", HERE / "queries.json")
+```
+
+Run: `.venv/bin/python tests/fixtures/gen_fixture.py`
+Expected: prints the four paths
+
+Append to `tests/test_search.py`:
+
+```python
+def test_shared_fixture_overlay_matches_python_search():
+    expected = json.loads((FIXTURES / "queries.json").read_text(encoding="utf-8"))
+    overlay = expected["overlay"]
+    index = TagIndex(
+        artifact.decode((FIXTURES / "overlay-main.bin").read_bytes()),
+        custom=artifact.decode((FIXTURES / "overlay.bin").read_bytes()),
+    )
+    for query, hits in overlay["queries"].items():
+        actual = [
+            {
+                "name": hit.name,
+                "category": hit.category,
+                "postCount": hit.post_count,
+                "deprecated": hit.deprecated,
+                "alias": hit.alias,
+                "rank": hit.rank,
+                "nameLength": hit.name_length,
+            }
+            for hit in index.search(query, limit=overlay["limit"])
+        ]
+        assert actual == hits, query
+```
+
+Add to `tests/test_search_js.mjs`:
+
+```javascript
+test("overlay results match the Python fixture", () => {
+  const overlay = expected.overlay;
+  const main = decodeArtifact(readBuffer(join(FIXTURES, "overlay-main.bin")));
+  const custom = decodeArtifact(readBuffer(join(FIXTURES, "overlay.bin")));
+  const index = new TagIndex(main, custom);
+  for (const [query, hits] of Object.entries(overlay.queries)) {
+    assert.deepEqual(index.search(query, { limit: overlay.limit }).map(project), hits, `query ${JSON.stringify(query)}`);
+  }
+});
+```
+
+Add the `readBuffer` helper next to the artifact read at the top of `tests/test_search_js.mjs`,
+and use it for the main artifact too:
+
+```javascript
+function readBuffer(path) {
+  const bytes = readFileSync(path);
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+}
+
+const artifactBuffer = readBuffer(join(FIXTURES, "artifact.bin"));
+```
+
+Run: `.venv/bin/python -m pytest tests/test_search.py -v && node --test tests/test_search_js.mjs`
+Expected: PASS (26 search tests, 7 Node tests)
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add web/search.js web/package.json tests/test_search_js.mjs
+git add web/search.js web/package.json tests/test_search_js.mjs tests/fixtures tests/test_search.py
 git commit -m "Add browser tag search with Node parity"
 ```
 
