@@ -33,8 +33,9 @@ The browser behaviour is verified by hand, as the design specifies. Run ComfyUI,
   `blue_hairband`.
 - The list shows a category badge, a post count, and `← alias` for alias matches.
 - `↑`/`↓` move the highlight and wrap at the ends; `PageUp`/`PageDown` jump ten rows.
-- `Tab` inserts the highlighted tag; `Escape` closes the list; with `Enter` insertion left off
-  (the default), `Enter` adds a newline and leaves the list open.
+- `Tab` inserts the highlighted tag and `Escape` closes the list.
+- With `Enter` insertion left off (the default), `Enter` adds a newline and the list closes,
+  because the new line starts an empty token.
 - Accepting `blue_hair` writes `1girl, blue_hair, ` and puts the caret after the new separator.
 - Accepting inside `1girl, blue_h, solo` leaves the existing comma and spacing alone.
 - With a long prompt that wraps, the list appears at the caret on the **first** line of the
@@ -48,6 +49,10 @@ The browser behaviour is verified by hand, as the design specifies. Run ComfyUI,
 - Typing a plain sentence with no matches leaves the field exactly as before: no interception,
   no swallowed keys, no flicker.
 - With Nodes 2.0 (`Modern Node Design`) enabled, the same checks pass.
+- Raising `Suggestion count` shows more rows and lowering it shows fewer.
+- With `Insert spaces instead of underscores` on, accepting `blue_hair` writes `blue hair`.
+- With `Show post counts` off, the rows carry no count.
+- Setting `Category to show` to `character` leaves only character tags; `all` brings the rest back.
 - With `Enable tag autocomplete` turned off in the settings, no list ever appears.
 - With another autocomplete extension active, this one stays off and logs why; turning on
   `Enable alongside another autocomplete` makes it appear.
