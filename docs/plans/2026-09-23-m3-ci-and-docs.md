@@ -644,13 +644,14 @@ Run each of these and confirm the output matches what the README claims:
 gh release list                                   # the README says a release exists; after Task 4 it does
 cat data/latest.json                              # the pointer the "How the tag data updates" section describes
 ls profiles/                                      # the README says only danbooru ships
-grep -c "^|" README.md                            # 21: 8 settings + 3 variables + 2 source rows + 8 header/separator rows
+grep -c "^|" README.md                            # 19: 13 data rows + 6 header/separator rows
 ```
 
 Expected: `data-2026.09.22` listed after Task 4, the committed pointer, only `danbooru.yaml`, and
-`21` from the last command — the eight settings and three variables and two source rows, plus the
-three tables' six header and six separator rows. The pattern is `^|` rather than `^| `: these tables
-use compact `|---|` separators, so a pipe-space pattern would count only the data rows.
+`19` from the last command — thirteen data rows (eight settings, three variables, two sources) plus
+three tables' six header and separator rows. The pattern is `^|` rather than `^| `: these tables use
+compact `|---|` separators, so a pipe-space pattern counts only the rows that have a space after the
+first pipe.
 
 - [ ] **Step 4: Commit**
 
