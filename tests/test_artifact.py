@@ -24,6 +24,11 @@ def test_roundtrip_preserves_every_field():
     assert decode(encode(original)).to_tagset() == original
 
 
+def test_to_bytes_returns_the_encoded_buffer():
+    data = encode(sample_tagset())
+    assert decode(data).to_bytes() == data
+
+
 def test_header_layout_is_stable():
     data = encode(sample_tagset())
     assert data[:4] == b"DTA1"

@@ -307,6 +307,10 @@ class Artifact:
             alias_target=tuple(self.alias_target(index) for index in range(self.n_aliases)),
         )
 
+    def to_bytes(self) -> bytes:
+        """Return the encoded artifact, byte-identical to what the encoder produced."""
+        return self._buffer
+
     @classmethod
     def from_tagset(cls, tagset: TagSet) -> "Artifact":
         return cls(encode(tagset))
