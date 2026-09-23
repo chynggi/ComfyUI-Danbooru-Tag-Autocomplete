@@ -1822,6 +1822,44 @@ git commit -m "Recover when the cached artifact is deleted"
 - The manual checklist in `README.md` is written and ready to walk.
 - No file outside `custom_nodes/ComfyUI-Danbooru-Tag-Autocomplete` was modified.
 
+## Carried forward
+
+Recorded here because the milestone ledger is a workspace artifact, not a committed one. Nothing
+below blocks the merge; each is either a narrow case, a cosmetic detail, or a later milestone's job.
+
+- **The browser checklist has never been walked.** M2b's browser behaviour is unverified: the hook,
+  the caret geometry, insertion, the dropdown's mouse handling, the banner, and the two renderers.
+  It needs a running ComfyUI, which is why it is a checklist. Treat `README.md`'s browser section
+  as the gate, not as documentation.
+- **The `deprecated` row badge is unreachable.** `search()` defaults `excludeDeprecated: true` and
+  nothing overrides it, so no hit ever carries `deprecated: true`. Spec §8.3 asks for a
+  `deprecated → canonical` display when the typed name is a deprecated alias target, but M2a's
+  `#aliasHits` skips a deprecated target outright. This is an M2a search-semantics question, not an
+  M2b rendering one.
+- **`/db` probes its file unguarded.** `db_route` and `artifact_content_encoding()` both call
+  `path.exists()` and then open the file, so a cache whose directory is readable but whose
+  `tags.bin.gz` is not can answer 500. Task 7 fixed the directory case; this is the single-file
+  case, and it needs one file's mode changed under a readable directory to reach.
+- **`formatPostCount(999_999)` renders `1000K`** rather than `1.0M`. Display only.
+- **The caret mirror does not copy `direction`**, so an RTL prompt would report a wrong `left`.
+  Danbooru tags are ASCII.
+- **`web/keys.js`'s tests omit three boundary cases**: `count === 1`, a `page` larger than the list,
+  and a negative index with an unknown action. The code is correct on all three.
+- **Each attached textarea owns a permanent dropdown element and mirror on `body`.** Deleting a
+  node leaves an empty hidden element. Both clear their contents when hidden, so no prompt text is
+  retained; the residual nodes are a negligible leak.
+- **Four names are exported without an importer**: `SETTING_IDS`, `mirrorFor`, `CATEGORY_LABELS`,
+  `CATEGORY_COLORS`. Kept as interface, since each task's brief documents them and the caret task's
+  verification step asserts its two exports.
+- **The checklist's `Modern Node Design` label** for the Nodes 2.0 setting has not been confirmed
+  against the real UI, so that line may need rewording when it is first walked.
+- **From M2a, still open for M3**: the distributed one-character latency gate measures 38.59 ms
+  against a 50 ms budget on the development machine (the real artifact measures 20.51 ms), and M3
+  must record the CI number before any budget change; M3's workflow must run the test suite *after*
+  the build so the real-artifact validation and latency gates execute; and `data/latest.json`
+  already points at a `data-2026.09.22` release that does not exist, so the download path is not
+  live until M3 publishes it.
+
 ## After M2b
 
 - **The checklist is the gate.** Walking it needs a running ComfyUI; the controller or the
