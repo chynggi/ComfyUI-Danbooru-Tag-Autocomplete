@@ -350,7 +350,7 @@ class SearchHit:
     name_length: int
 
 
-def _hit_sort_key(hit: SearchHit) -> tuple[int, int, int, str]:
+def hit_sort_key(hit: SearchHit) -> tuple[int, int, int, str]:
     return (hit.rank, hit.name_length if hit.rank == RANK_NAME_PREFIX else 0, -hit.post_count, hit.name)
 
 
@@ -416,7 +416,7 @@ class TagIndex:
                 RANK_ALIAS_PREFIX, len(name_bytes),
             )
             current = best.get(hit.name)
-            if current is None or _hit_sort_key(hit) < _hit_sort_key(current):
+            if current is None or hit_sort_key(hit) < hit_sort_key(current):
                 best[hit.name] = hit
         return best
 
@@ -440,9 +440,9 @@ class TagIndex:
             )
         for name, hit in self._alias_hits(source, key_bytes, categories, exclude_deprecated).items():
             current = combined.get(name)
-            if current is None or _hit_sort_key(hit) < _hit_sort_key(current):
+            if current is None or hit_sort_key(hit) < hit_sort_key(current):
                 combined[name] = hit
-        return {hit.name: hit for hit in heapq.nsmallest(limit, combined.values(), key=_hit_sort_key)}
+        return {hit.name: hit for hit in heapq.nsmallest(limit, combined.values(), key=hit_sort_key)}
 
     def search(
         self,
@@ -470,7 +470,7 @@ class TagIndex:
                 self._main, key_bytes, limit + len(custom), categories, exclude_deprecated
             )
             merged.update(custom)
-        return sorted(merged.values(), key=_hit_sort_key)[:limit]
+        return sorted(merged.values(), key=hit_sort_key)[:limit]
 
 
 VALID_CATEGORIES = frozenset({0, 1, 3, 4, 5})
