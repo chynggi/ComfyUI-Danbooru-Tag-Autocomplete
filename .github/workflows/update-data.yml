@@ -1,0 +1,105 @@
+name: Update tag data
+
+on:
+  schedule:
+    # 18:00 UTC, which is 03:00 KST.
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# A manual dispatch during the nightly run must not race it for the release or the pointer commit.
+concurrency:
+  group: update-data
+  cancel-in-progress: false
+
+jobs:
+  data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          # The job commits and pushes the pointer, so give it real history rather than a
+          # single-commit shallow clone.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install the build dependencies
+        # Build-only. The node's own runtime dependencies stay at zero.
+        run: python -m pip install --disable-pip-version-check requests pyarrow pyyaml pytest
+
+      - name: Fetch the upstream datasets
+        run: python build/fetch_upstream.py --cache data/raw
+
+      - name: Build the artifact and the committed pointer
+        run: >-
+          python build/build_database.py
+          --profile profiles/danbooru.yaml
+          --out generated
+          --latest-json data/latest.json
+          --repo-slug "$GITHUB_REPOSITORY"
+
+      - name: Validate the artifact
+        run: >-
+          python build/validate_database.py
+          --artifact generated/tags.bin.gz
+          --metadata generated/metadata.json
+
+      - name: Test
+        # Deliberately after the build. The real-artifact gate and all three latency gates only run
+        # once generated/tags.bin.gz exists, and they are this project's performance contract.
+        # -s keeps the printed p95 numbers in the log, which is where the CI figures are read from.
+        run: python -m pytest -q -s
+
+      - name: Decide whether to publish
+        id: publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version=$(python -c "import json; print(json.load(open('generated/metadata.json'))['data_version'])")
+          tag="data-$version"
+          changed=false
+          git diff --quiet -- data/latest.json || changed=true
+          exists=true
+          gh release view "$tag" >/dev/null 2>&1 || exists=false
+          # Publish when the data changed, and also when the pointer already matches but the
+          # release it names is missing: otherwise the download URL would stay dead until the
+          # next upstream change, which may be days away.
+          publish=false
+          if [ "$changed" = true ] || [ "$exists" = false ]; then publish=true; fi
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "publish=$publish"
+            echo "changed=$changed"
+            echo "exists=$exists"
+          } >> "$GITHUB_OUTPUT"
+          echo "data $version: changed=$changed release_exists=$exists publish=$publish"
+
+      - name: Publish the data release
+        if: steps.publish.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ steps.publish.outputs.tag }}"
+          gh release view "$tag" >/dev/null 2>&1 \
+            || gh release create "$tag" --title "$tag" \
+                 --notes "Danbooru tag data ${{ steps.publish.outputs.version }}" --latest=false
+          gh release upload "$tag" generated/tags.bin.gz generated/metadata.json --clobber
+
+      - name: Commit the pointer
+        if: steps.publish.outputs.publish == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/latest.json
+          git diff --cached --quiet \
+            || git commit -m "Update tag data to ${{ steps.publish.outputs.version }}"
+          git push
