@@ -595,9 +595,13 @@ export function caretCoordinates(textarea, position) {
   marker.textContent = value.slice(stop) || ".";
   mirror.appendChild(marker);
 
+  // The mirror sits at the page origin, so the marker's offset is relative to the textarea's
+  // text flow. The dropdown is an absolutely positioned child of body, so it needs page
+  // coordinates: add the textarea's own position and subtract the text it has scrolled past.
+  const rect = textarea.getBoundingClientRect();
   const coordinates = {
-    top: marker.offsetTop + parseInt(mirror.style.borderTopWidth || "0", 10) - textarea.scrollTop,
-    left: marker.offsetLeft + parseInt(mirror.style.borderLeftWidth || "0", 10) - textarea.scrollLeft,
+    top: rect.top + window.scrollY + marker.offsetTop + parseInt(mirror.style.borderTopWidth || "0", 10) - textarea.scrollTop,
+    left: rect.left + window.scrollX + marker.offsetLeft + parseInt(mirror.style.borderLeftWidth || "0", 10) - textarea.scrollLeft,
     height: parseInt(mirror.style.lineHeight, 10) || marker.offsetHeight,
   };
   marker.remove();
@@ -825,6 +829,10 @@ export class TagDropdown {
       row.addEventListener("mouseenter", () => this.#setIndex(position));
       row.addEventListener("mousedown", (event) => {
         event.preventDefault();
+        // Do not rely on the mouseenter that usually precedes this: when the list opens
+        // under a stationary pointer no mouseenter fires until the pointer moves, and the
+        // click would then accept whichever row was highlighted instead of the clicked one.
+        this.#setIndex(position);
         this.accept();
       });
       this.element.appendChild(row);
