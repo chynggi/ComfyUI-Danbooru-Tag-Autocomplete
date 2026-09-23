@@ -901,6 +901,36 @@ for the artifact that existed when they were written.
   building, tests and the browser checklist.
 - No file outside `custom_nodes/ComfyUI-Danbooru-Tag-Autocomplete` was modified.
 
+## Carried forward
+
+- **A running install never re-reads the pointer.** `ensure_download()` returns immediately when the
+  cache is present, `status()` reports `ready`, and the status route only kicks a download when the
+  state is `missing`, so newer tag data reaches a fresh install or a user who deletes ComfyUI's user
+  directory `danbooru-tag-autocomplete/` — which is what the browser checklist already tests. This is
+  consistent with spec §10.2 and §10.3, which describe downloading only when the cache is absent, and
+  §10.4's "only the update check fails" is ambiguous about whether a check exists when the cache is
+  present. The README now states the behaviour plainly instead of implying automatic updates. An
+  automatic check would be small — on the first `/status` of a process, if the cache exists, fetch the
+  pointer, compare its `data_version` with the cached one, and start the existing background download
+  when it is newer, failing silently when offline — but it is a runtime behaviour change to `store.py`
+  that this milestone's scope did not cover, so it is recorded rather than added.
+- **A data update is not visible to an already-open tab.** The browser builds its index once at load,
+  so even a fresh download needs a page reload to reach the dropdown.
+- **Spec §14's two build requirements are unmet.** The source repositories have no environment
+  override, so replacing one means editing `SOURCE_ORDER`; and there is no fallback, so if
+  `HDiffusion/historical-danbooru-tag-counts` is withdrawn the nightly build fails until someone edits
+  the code. The README states both limitations.
+- **Spec §5's profile list is now inaccurate.** It names `illustrious`, `noobai`, `pony` and `wai`
+  profiles; only `danbooru` ships, because the design gives no filter values for the others and their
+  ecosystems share the tag set.
+- **The manual browser checklist has never been executed.** It is the only verification M2b's browser
+  layers and the live install path get, and it needs a running ComfyUI.
+- **From M2b, still open:** the `deprecated → canonical` display spec §8.3 asks for and M2a's search
+  does not produce, and the smaller items listed in that plan's "Carried forward" section.
+- **The 52 browser-module tests ran on CI for the first time in this milestone's third dispatch.**
+  Before that they existed only on development machines, which is how a false README claim about them
+  survived two reviews.
+
 ## After M3
 
 - **The browser checklist is still the one gate nothing here can close.** It needs a running
