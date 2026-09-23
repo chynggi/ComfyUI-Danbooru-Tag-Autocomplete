@@ -32,8 +32,9 @@ jobs:
           python-version: "3.13"
 
       - name: Install the build dependencies
-        # Build-only. The node's own runtime dependencies stay at zero.
-        run: python -m pip install --disable-pip-version-check requests pyarrow pyyaml pytest
+        # Build and test dependencies only. The node's runtime dependencies stay at zero; aiohttp
+        # is here because the route and package tests import it, and ComfyUI ships it at runtime.
+        run: python -m pip install --disable-pip-version-check requests pyarrow pyyaml aiohttp pytest
 
       - name: Fetch the upstream datasets
         run: python build/fetch_upstream.py --cache data/raw
