@@ -1150,7 +1150,7 @@ Add to `tests/test_search_js.mjs`:
 ```javascript
 test("astral names tie-break by code point, not UTF-16 code unit", () => {
   const index = new TagIndex(decodeArtifact(artifactBuffer));
-  assert.deepEqual(index.search("x").map((hit) => hit.name), ["x\ue000x", "x\U00010000"]);
+  assert.deepEqual(index.search("x").map((hit) => hit.name), ["x\ue000x", "x\u{10000}"]);
 });
 ```
 
