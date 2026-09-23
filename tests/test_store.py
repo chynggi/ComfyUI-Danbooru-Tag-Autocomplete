@@ -5,6 +5,7 @@ import hashlib
 import http.server
 import importlib
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -313,3 +314,17 @@ def test_status_reports_missing_when_a_ready_cache_is_deleted(store):
     (store.cache_dir() / "tags.bin.gz").unlink()
 
     assert store.status().state == store.STATE_MISSING
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
+def test_status_never_raises_when_the_cache_is_unreadable(store):
+    # Path.exists() re-raises EACCES, so probing an unreadable cache would otherwise make
+    # status() raise and the status route answer 500. An unreadable cache is not a ready one.
+    build_artifact(store.cache_dir())
+    store._state = store.STATE_READY
+    os.chmod(store.cache_dir(), 0o000)
+    try:
+        assert store.status().state == store.STATE_MISSING
+        store.ensure_download()  # must not raise either
+    finally:
+        os.chmod(store.cache_dir(), 0o755)

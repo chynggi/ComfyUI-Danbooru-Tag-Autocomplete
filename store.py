@@ -106,9 +106,9 @@ def _latest_url() -> str:
 
 def _data_version() -> str | None:
     path = metadata_path()
-    if not path.exists():
-        return None
     try:
+        if not path.exists():
+            return None
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
@@ -117,9 +117,18 @@ def _data_version() -> str | None:
     return payload.get("data_version")
 
 
+def _cache_present() -> bool:
+    """Whether both cache files are readable. An unreadable cache counts as absent so callers
+    can recover: `Path.exists` re-raises EACCES rather than reporting absence."""
+    try:
+        return artifact_path().exists() and metadata_path().exists()
+    except OSError:
+        return False
+
+
 def status() -> Status:
     """Report the cache state. Never raises."""
-    ready = artifact_path().exists() and metadata_path().exists()
+    ready = _cache_present()
     with _lock:
         if ready and _state != STATE_DOWNLOADING:
             return Status(STATE_READY, _data_version(), None)
@@ -140,7 +149,7 @@ def ensure_download() -> None:
     """
     global _state, _error, _download_thread
     with _lock:
-        ready = artifact_path().exists() and metadata_path().exists()
+        ready = _cache_present()
         if ready:
             _state = STATE_READY
             return
