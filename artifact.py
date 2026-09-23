@@ -7,17 +7,23 @@ Keep it free of ComfyUI imports so the build pipeline can run standalone.
 from __future__ import annotations
 
 import csv
+import gzip
 import heapq
 import io
 import json
 import sys
 import struct
+import zlib
 from dataclasses import dataclass
 from typing import Callable, Iterator
 
 MAGIC = b"DTA1"
 FORMAT_VERSION = 1
 HEADER_SIZE = 64
+
+# Failures that mean "the artifact bytes could not be read". gzip.decompress raises
+# EOFError on a truncated stream and zlib.error on a corrupt body; neither is an OSError.
+READ_ERRORS = (OSError, EOFError, zlib.error, gzip.BadGzipFile)
 
 FLAG_HAS_ALIASES = 1 << 0
 
@@ -459,16 +465,21 @@ class TagIndex:
         if self._custom is None:
             merged = self._search_source(self._main, key_bytes, limit, categories, exclude_deprecated)
         else:
-            # The overlay wins by name even when it ranks lower than the main entry it
-            # replaces, so over-select main by the number of overlay names to keep the
-            # bounded window exact.
+            # The overlay is authoritative for every name it claims, including names it
+            # claims with an entry the current filter would exclude, so the claimed names are
+            # collected unfiltered and removed from the main result before the overlay merges.
+            claimed = self._search_source(
+                self._custom, key_bytes, self._custom.n_tags + self._custom.n_aliases, None, False
+            )
             custom = self._search_source(
                 self._custom, key_bytes, self._custom.n_tags + self._custom.n_aliases,
                 categories, exclude_deprecated,
             )
             merged = self._search_source(
-                self._main, key_bytes, limit + len(custom), categories, exclude_deprecated
+                self._main, key_bytes, limit + len(claimed), categories, exclude_deprecated
             )
+            for name in claimed:
+                merged.pop(name, None)
             merged.update(custom)
         return sorted(merged.values(), key=hit_sort_key)[:limit]
 

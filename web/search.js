@@ -280,18 +280,19 @@ export class TagIndex {
         merged.set(hit.name, hit);
       }
     } else {
-      // The overlay wins by name even when it ranks lower than the main entry it
-      // replaces, so over-select main by the number of overlay names to keep the
-      // bounded window exact. Keep this in step with TagIndex.search in artifact.py.
-      const custom = this.#searchSource(
-        this.custom,
-        keyBytes,
-        this.custom.nTags + this.custom.nAliases,
-        categories,
-        excludeDeprecated,
+      // Keep this in step with TagIndex.search in artifact.py: the overlay is authoritative
+      // for every name it claims, even when the current filter would drop its entry.
+      const claimed = this.#searchSource(
+        this.custom, keyBytes, this.custom.nTags + this.custom.nAliases, null, false,
       );
-      for (const hit of this.#searchSource(this.main, keyBytes, limit + custom.length, categories, excludeDeprecated)) {
+      const custom = this.#searchSource(
+        this.custom, keyBytes, this.custom.nTags + this.custom.nAliases, categories, excludeDeprecated,
+      );
+      for (const hit of this.#searchSource(this.main, keyBytes, limit + claimed.length, categories, excludeDeprecated)) {
         merged.set(hit.name, hit);
+      }
+      for (const hit of claimed) {
+        merged.delete(hit.name);
       }
       for (const hit of custom) {
         merged.set(hit.name, hit);

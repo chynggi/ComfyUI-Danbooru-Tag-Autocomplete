@@ -223,6 +223,17 @@ def test_custom_payload_reports_a_broken_custom_file(store, tmp_path, monkeypatc
     assert [hit.name for hit in store.load_index().search("blue_h")] == ["blue_hair"]
 
 
+def test_custom_payload_survives_a_corrupt_artifact(store, tmp_path, monkeypatch):
+    source = build_artifact(tmp_path / "corrupt")
+    payload = bytearray(source.read_bytes())
+    payload[len(payload) // 2] ^= 0xFF
+    source.write_bytes(bytes(payload))
+    monkeypatch.setenv("DTA_LOCAL_ARTIFACT", str(source))
+    (store.cache_dir() / "custom_tags.csv").write_text("a,0,1,\n", encoding="utf-8")
+
+    assert store.custom_payload()["available"] is False
+
+
 def test_status_ignores_a_non_object_metadata_file(store, tmp_path, monkeypatch):
     monkeypatch.setenv("DTA_LOCAL_ARTIFACT", str(build_artifact(tmp_path / "generated")))
     store.metadata_path().write_text("[1, 2, 3]", encoding="utf-8")

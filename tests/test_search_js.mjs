@@ -75,6 +75,16 @@ test("overlay results match the Python fixture", () => {
   }
 });
 
+test("overlay precedence holds under a category filter", () => {
+  const main = decodeArtifact(readBuffer(join(FIXTURES, "overlay-main.bin")));
+  const custom = decodeArtifact(readBuffer(join(FIXTURES, "overlay.bin")));
+  const index = new TagIndex(main, custom);
+  assert.deepEqual(
+    index.search("c", { limit: 2, categories: new Set([0]) }).map((hit) => hit.name),
+    ["c1", "c2"],
+  );
+});
+
 test("astral names tie-break by code point, not UTF-16 code unit", () => {
   const index = new TagIndex(decodeArtifact(artifactBuffer));
   assert.deepEqual(index.search("x").map((hit) => hit.name), ["x\ue000x", "x\u{10000}"]);

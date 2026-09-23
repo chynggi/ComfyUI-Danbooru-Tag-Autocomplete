@@ -31,7 +31,7 @@ SHIPPED_TAGS = 1_709_994
 DECODE_BUDGET_SECONDS = 5.0
 LONG_PREFIX_P95_BUDGET_SECONDS = 0.05
 SHORT_PREFIX_P95_BUDGET_SECONDS = 0.05
-REAL_ARTIFACT = Path("generated/tags.bin.gz")
+REAL_ARTIFACT = Path(__file__).resolve().parents[1] / "generated" / "tags.bin.gz"
 
 
 def tagset_with_shared_prefix(count: int) -> TagSet:

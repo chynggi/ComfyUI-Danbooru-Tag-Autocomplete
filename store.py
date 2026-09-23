@@ -24,7 +24,7 @@ from pathlib import Path
 
 import requests
 
-from .artifact import Artifact, TagIndex, build_custom_overlay, decode
+from .artifact import Artifact, READ_ERRORS, TagIndex, build_custom_overlay, decode
 
 CACHE_DIRNAME = "danbooru-tag-autocomplete"
 ARTIFACT_FILENAME = "tags.bin.gz"
@@ -230,7 +230,7 @@ def load_custom() -> tuple[Artifact | None, tuple[str, ...]]:
         return _custom_cache[1]
     try:
         result = build_custom_overlay(load_artifact(), path.read_text(encoding="utf-8"), path.name)
-    except (OSError, ValueError, TypeError, csv.Error) as exc:
+    except (*READ_ERRORS, ValueError, TypeError, csv.Error) as exc:
         log.warning("danbooru-tag-autocomplete: %s could not be used: %s", path.name, exc)
         result = (None, (f"{path.name}: {exc}",))
     _custom_cache = (identity, result)

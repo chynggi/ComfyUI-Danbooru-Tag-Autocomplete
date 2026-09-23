@@ -94,6 +94,15 @@ def test_a_truncated_database_returns_an_empty_string(node, tmp_path, monkeypatc
     assert node.search("blue_h", "any", 32, True)[0] == ""
 
 
+def test_a_corrupt_database_returns_an_empty_string(node, tmp_path, monkeypatch):
+    source = build_source(tmp_path / "corrupt")
+    payload = bytearray(source.read_bytes())
+    payload[len(payload) // 2] ^= 0xFF
+    source.write_bytes(bytes(payload))
+    monkeypatch.setenv("DTA_LOCAL_ARTIFACT", str(source))
+    assert node.search("blue_h", "any", 32, True)[0] == ""
+
+
 def test_input_types_expose_the_documented_options(node):
     required = node.INPUT_TYPES()["required"]
     assert list(required) == ["query", "category", "limit", "exclude_deprecated"]

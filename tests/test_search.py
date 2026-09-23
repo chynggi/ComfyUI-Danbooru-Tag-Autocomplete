@@ -203,6 +203,23 @@ def test_custom_override_keeps_a_deeper_main_candidate_when_it_ranks_lower():
     assert [hit.name for hit in hits] == ["c0001", "c0002"]
 
 
+def test_overlay_claims_a_name_even_when_the_filter_excludes_it():
+    main = Artifact.from_tagset(TagSet(
+        threshold=0,
+        tags=(TagEntry("t0", 0, 100, False), TagEntry("t1", 0, 90, False)),
+        aliases=(),
+        alias_target=(),
+    ))
+    custom = Artifact.from_tagset(TagSet(
+        threshold=0,
+        tags=(TagEntry("t0", 4, 0, False),),
+        aliases=(),
+        alias_target=(),
+    ))
+    hits = TagIndex(main, custom=custom).search("t", limit=2, categories=frozenset({0}))
+    assert [hit.name for hit in hits] == ["t1"]
+
+
 def test_shared_fixture_overlay_matches_python_search():
     expected = json.loads((FIXTURES / "queries.json").read_text(encoding="utf-8"))
     overlay = expected["overlay"]

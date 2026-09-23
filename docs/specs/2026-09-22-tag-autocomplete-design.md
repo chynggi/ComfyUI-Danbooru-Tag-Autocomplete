@@ -325,6 +325,8 @@ main 인덱스의 이름/alias 배열과 custom 오버레이의 이름/alias 배
 
 선택은 bounded top-k로 수행한다. 이름 후보는 필터를 통과한 뒤 (rank, 이름 byte 길이, -post_count, index) 튜플로 비교하고 heapq.nsmallest로 상위 limit만 남긴 뒤 디코드한다. 카테고리와 deprecated 필터는 선택 이전에 적용하므로 필터가 슬롯을 소모하지 않는다. 결과는 근사가 아니라 정확하다. custom 오버레이는 이름 기준으로 main을 대체하며 대체된 항목이 main보다 낮게 정렬될 수 있으므로, 정확도를 유지하기 위해 main 후보를 오버레이 이름 수만큼 더 선택한다.
 
+custom 오버레이는 자기가 차지한 이름에 대해 항상 우선한다. 현재 필터가 오버레이 항목을 제외하더라도 그 이름을 main 결과에서 제거하며, 필터는 오버레이 병합 이후의 관점에 적용된다.
+
 ### 8.3 deprecated / alias 상태 표시
 
 - `exclude_deprecated`가 참이면 deprecated 태그는 결과에서 제외한다.

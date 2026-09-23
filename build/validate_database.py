@@ -8,15 +8,12 @@ import gzip
 import hashlib
 import json
 import sys
-import zlib
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from artifact import VALID_CATEGORIES, decode, load_custom  # noqa: E402
-
-READ_ERRORS = (OSError, EOFError, zlib.error, gzip.BadGzipFile)
+from artifact import READ_ERRORS, VALID_CATEGORIES, decode, load_custom  # noqa: E402
 
 
 def read_artifact(path: Path) -> bytes:

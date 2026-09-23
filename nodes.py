@@ -6,7 +6,7 @@ import logging
 import re
 
 from . import store
-from .artifact import CATEGORY_NAMES, SearchHit, hit_sort_key
+from .artifact import CATEGORY_NAMES, READ_ERRORS, SearchHit, hit_sort_key
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ class DanbooruTagSearch:
 
         try:
             index = store.load_index()
-        except (FileNotFoundError, OSError, EOFError, ValueError) as exc:
+        except (*READ_ERRORS, ValueError) as exc:
             log.warning("danbooru-tag-search: tag database is unavailable: %s", exc)
             return ("",)
 
