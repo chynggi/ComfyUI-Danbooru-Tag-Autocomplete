@@ -1825,270 +1825,7 @@ git commit -m "Add runtime artifact store"
 
 ---
 
-### Task 4: HTTP routes and package wiring
-
-**Files:**
-- Create: `routes.py`
-- Create: `__init__.py`
-- Create: `tests/test_routes.py`
-
-**Interfaces:**
-- Consumes: `store.status`, `store.ensure_download`, `store.artifact_path`, `store.artifact_content_encoding`, `store.custom_payload`, `store.STATE_MISSING`
-- Produces:
-  - `routes.register_routes(app_routes) -> None`
-  - three aiohttp handlers registered on `PromptServer.instance.routes` at import: `GET /danbooru-tag-autocomplete/status`, `GET /danbooru-tag-autocomplete/db`, `GET /danbooru-tag-autocomplete/custom`
-  - `/status` JSON: `{"state": str, "dataVersion": str | null, "error": str | null}`; kicks off a download when the state is `missing`
-  - `/db`: the artifact bytes with `Content-Type: application/octet-stream`, `Content-Encoding: gzip` when the file is gzipped, `Cache-Control: no-cache`, or a 404 JSON `{"error": str}`
-  - `/custom`: the `store.custom_payload()` JSON
-  - `__init__.py` exports `WEB_DIRECTORY = "./web"`, `NODE_CLASS_MAPPINGS`, `NODE_DISPLAY_NAME_MAPPINGS`
-
-`register_routes(app_routes)` takes the route table as a parameter so the tests can pass a
-recorder instead of `PromptServer.instance.routes`.
-
-- [ ] **Step 1: Install the test-only HTTP dependency and write the failing route tests**
-
-Run: `uv pip install --python .venv/bin/python aiohttp`
-
-The route tests stub `server` so they can exercise the handlers without a running
-ComfyUI. `aiohttp` is a ComfyUI runtime dependency; installing it in this project's venv
-is test-only.
-
-Create `tests/test_routes.py`:
-
-```python
-import importlib
-import json
-import sys
-import types
-
-import pytest
-
-from artifact import TagEntry, TagSet, encode
-
-
-class RouteRecorder:
-    def __init__(self):
-        self.handlers = {}
-
-    def _register(self, method, path):
-        def decorator(handler):
-            self.handlers[(method, path)] = handler
-            return handler
-
-        return decorator
-
-    def get(self, path):
-        return self._register("GET", path)
-
-
-class FakeRequest:
-    pass
-
-
-@pytest.fixture
-def routes(node_package, monkeypatch):
-    recorder = RouteRecorder()
-    server = types.ModuleType("server")
-    server.PromptServer = types.SimpleNamespace(instance=types.SimpleNamespace(routes=recorder))
-    monkeypatch.setitem(sys.modules, "server", server)
-    module = importlib.import_module(f"{node_package}.routes")
-    return module, recorder
-
-
-def build_source(directory):
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / "tags.bin.gz"
-    import gzip
-
-    raw = encode(TagSet(threshold=25, tags=(TagEntry("1girl", 0, 10, False),), aliases=(), alias_target=()))
-    with open(path, "wb") as handle:
-        with gzip.GzipFile(fileobj=handle, mode="wb", mtime=0) as stream:
-            stream.write(raw)
-    (directory / "metadata.json").write_text(json.dumps({"data_version": "2026.09.22"}), encoding="utf-8")
-    return path
-
-
-def test_all_routes_are_registered(routes):
-    _, recorder = routes
-    assert set(recorder.handlers) == {
-        ("GET", "/danbooru-tag-autocomplete/status"),
-        ("GET", "/danbooru-tag-autocomplete/db"),
-        ("GET", "/danbooru-tag-autocomplete/custom"),
-    }
-
-
-def test_status_reports_ready_with_a_local_artifact(routes, tmp_path, monkeypatch):
-    module, recorder = routes
-    monkeypatch.setenv("DTA_LOCAL_ARTIFACT", str(build_source(tmp_path / "generated")))
-
-    response = importlib.import_module("asyncio").run(
-        recorder.handlers[("GET", "/danbooru-tag-autocomplete/status")](FakeRequest())
-    )
-
-    assert response.status == 200
-    assert json.loads(response.body) == {"state": "ready", "dataVersion": "2026.09.22", "error": None}
-
-
-def test_db_serves_the_artifact_with_gzip_encoding(routes, tmp_path, monkeypatch):
-    module, recorder = routes
-    source = build_source(tmp_path / "generated")
-    monkeypatch.setenv("DTA_LOCAL_ARTIFACT", str(source))
-
-    response = importlib.import_module("asyncio").run(
-        recorder.handlers[("GET", "/danbooru-tag-autocomplete/db")](FakeRequest())
-    )
-
-    assert response.status == 200
-    assert response.headers["Content-Encoding"] == "gzip"
-    assert response.headers["Content-Type"] == "application/octet-stream"
-    assert response.headers["Cache-Control"] == "no-cache"
-
-
-def test_db_returns_404_without_an_artifact(routes, tmp_path, monkeypatch):
-    module, recorder = routes
-    monkeypatch.setenv("DTA_LOCAL_ARTIFACT", str(tmp_path / "generated" / "tags.bin.gz"))
-
-    response = importlib.import_module("asyncio").run(
-        recorder.handlers[("GET", "/danbooru-tag-autocomplete/db")](FakeRequest())
-    )
-
-    assert response.status == 404
-    assert "error" in json.loads(response.body)
-
-
-def test_custom_returns_the_overlay_payload(routes, tmp_path, monkeypatch):
-    module, recorder = routes
-    monkeypatch.setenv("DTA_LOCAL_ARTIFACT", str(build_source(tmp_path / "generated")))
-
-    response = importlib.import_module("asyncio").run(
-        recorder.handlers[("GET", "/danbooru-tag-autocomplete/custom")](FakeRequest())
-    )
-
-    assert response.status == 200
-    assert json.loads(response.body) == {"available": False, "warnings": [], "bytes": None}
-```
-
-- [ ] **Step 2: Run the tests to verify they fail**
-
-Run: `.venv/bin/python -m pytest tests/test_routes.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'dta_node.routes'`
-
-- [ ] **Step 3: Write `routes.py`**
-
-```python
-"""HTTP routes serving the tag artifact to the browser."""
-
-from __future__ import annotations
-
-from aiohttp import web
-from server import PromptServer
-
-from . import store
-
-PREFIX = "/danbooru-tag-autocomplete"
-
-
-async def status_route(request: web.Request) -> web.Response:
-    current = store.status()
-    if current.state == store.STATE_MISSING:
-        store.ensure_download()
-        current = store.status()
-    return web.json_response(
-        {"state": current.state, "dataVersion": current.data_version, "error": current.error}
-    )
-
-
-async def db_route(request: web.Request) -> web.Response:
-    path = store.artifact_path()
-    if not path.exists():
-        return web.json_response({"error": "tag database is not available"}, status=404)
-    response = web.FileResponse(path)
-    response.headers["Content-Type"] = "application/octet-stream"
-    response.headers["Cache-Control"] = "no-cache"
-    encoding = store.artifact_content_encoding()
-    if encoding is not None:
-        response.headers["Content-Encoding"] = encoding
-    return response
-
-
-async def custom_route(request: web.Request) -> web.Response:
-    return web.json_response(store.custom_payload())
-
-
-def register_routes(app_routes) -> None:
-    app_routes.get(f"{PREFIX}/status")(status_route)
-    app_routes.get(f"{PREFIX}/db")(db_route)
-    app_routes.get(f"{PREFIX}/custom")(custom_route)
-
-
-register_routes(PromptServer.instance.routes)
-```
-
-- [ ] **Step 4: Write `__init__.py`**
-
-```python
-"""Danbooru tag autocomplete for ComfyUI."""
-
-from __future__ import annotations
-
-from .nodes import DanbooruTagSearch
-
-WEB_DIRECTORY = "./web"
-
-NODE_CLASS_MAPPINGS = {"DanbooruTagSearch": DanbooruTagSearch}
-NODE_DISPLAY_NAME_MAPPINGS = {"DanbooruTagSearch": "Danbooru Tag Search"}
-
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
-
-from . import routes  # noqa: E402,F401  registers the HTTP routes on import
-```
-
-- [ ] **Step 5: Run the route tests to verify they pass**
-
-Run: `.venv/bin/python -m pytest tests/test_routes.py -v`
-Expected: PASS (5 passed)
-
-- [ ] **Step 6: Verify the package imports the way ComfyUI loads it**
-
-Run:
-```bash
-.venv/bin/python - <<'PY'
-import importlib.util
-import sys
-import types
-
-root = "."
-package = types.ModuleType("dta_probe")
-package.__path__ = [root]
-sys.modules["dta_probe"] = package
-server = types.ModuleType("server")
-server.PromptServer = types.SimpleNamespace(instance=types.SimpleNamespace(routes=types.SimpleNamespace(get=lambda path: lambda handler: handler)))
-sys.modules["server"] = server
-folder_paths = types.ModuleType("folder_paths")
-folder_paths.get_user_directory = lambda: "/tmp"
-sys.modules["folder_paths"] = folder_paths
-
-module = importlib.import_module("dta_probe")
-print("WEB_DIRECTORY", module.WEB_DIRECTORY)
-print("NODES", sorted(module.NODE_CLASS_MAPPINGS))
-print("DISPLAY", list(module.NODE_DISPLAY_NAME_MAPPINGS.values()))
-PY
-```
-Expected: prints `WEB_DIRECTORY ./web`, `NODES ['DanbooruTagSearch']`, `DISPLAY ['Danbooru Tag Search']`
-
-- [ ] **Step 7: Run the full suite and commit**
-
-Run: `.venv/bin/python -m pytest -q`
-Expected: PASS
-
-```bash
-git add routes.py __init__.py tests/test_routes.py
-git commit -m "Add tag database HTTP routes"
-```
-
----
-
-### Task 5: The `Danbooru Tag Search` node
+### Task 4: The `Danbooru Tag Search` node
 
 **Files:**
 - Create: `nodes.py`
@@ -2302,6 +2039,300 @@ Expected: PASS (both)
 ```bash
 git add nodes.py tests/test_nodes.py
 git commit -m "Add Danbooru Tag Search node"
+```
+
+---
+
+### Task 5: HTTP routes and package wiring
+
+**Files:**
+- Create: `routes.py`
+- Create: `__init__.py`
+- Create: `tests/test_routes.py`
+- Modify: `pyproject.toml` (add `addopts = "--confcutdir=tests"`)
+
+**Interfaces:**
+- Consumes: `store.status`, `store.ensure_download`, `store.artifact_path`, `store.artifact_content_encoding`, `store.custom_payload`, `store.STATE_MISSING`
+- Produces:
+  - `routes.register_routes(app_routes) -> None`
+  - three aiohttp handlers registered on `PromptServer.instance.routes` at import: `GET /danbooru-tag-autocomplete/status`, `GET /danbooru-tag-autocomplete/db`, `GET /danbooru-tag-autocomplete/custom`
+  - `/status` JSON: `{"state": str, "dataVersion": str | null, "error": str | null}`; kicks off a download when the state is `missing`
+  - `/db`: the artifact bytes with `Content-Type: application/octet-stream`, `Content-Encoding: gzip` when the file is gzipped, `Cache-Control: no-cache`, or a 404 JSON `{"error": str}`
+  - `/custom`: the `store.custom_payload()` JSON
+  - `__init__.py` exports `WEB_DIRECTORY = "./web"`, `NODE_CLASS_MAPPINGS`, `NODE_DISPLAY_NAME_MAPPINGS`
+
+`register_routes(app_routes)` takes the route table as a parameter so the tests can pass a
+recorder instead of `PromptServer.instance.routes`.
+
+- [ ] **Step 1: Install the test-only HTTP dependency, keep pytest out of the node package, and write the failing route tests**
+
+Run: `uv pip install --python .venv/bin/python aiohttp`
+
+`__init__.py` is the ComfyUI entry point, so the repository root is a Python package. Left
+alone, pytest imports it during the run, and its relative imports fail outside ComfyUI's
+loader (`ImportError: attempted relative import with no known parent package`), which turns
+every test into a setup error. Limit conftest discovery to `tests/` so pytest never walks up
+into it. Add to `pyproject.toml`:
+
+```toml
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The repository root holds the node's __init__.py, which pytest otherwise imports as a
+# package during collection; its relative imports only resolve under ComfyUI's loader.
+addopts = "--confcutdir=tests"
+markers = [
+    "slow: exercises a full-size synthetic artifact; run with -m slow",
+]
+```
+
+Verify the suite still runs before going further: `.venv/bin/python -m pytest -q` should
+collect and pass, not error.
+
+The route tests stub `server` so they can exercise the handlers without a running
+ComfyUI. `aiohttp` is a ComfyUI runtime dependency; installing it in this project's venv
+is test-only.
+
+Create `tests/test_routes.py`:
+
+```python
+import importlib
+import json
+import sys
+import types
+
+import pytest
+
+from artifact import TagEntry, TagSet, encode
+
+
+class RouteRecorder:
+    def __init__(self):
+        self.handlers = {}
+
+    def _register(self, method, path):
+        def decorator(handler):
+            self.handlers[(method, path)] = handler
+            return handler
+
+        return decorator
+
+    def get(self, path):
+        return self._register("GET", path)
+
+
+class FakeRequest:
+    pass
+
+
+@pytest.fixture
+def routes(node_package, tmp_path, monkeypatch):
+    recorder = RouteRecorder()
+    server = types.ModuleType("server")
+    server.PromptServer = types.SimpleNamespace(instance=types.SimpleNamespace(routes=recorder))
+    monkeypatch.setitem(sys.modules, "server", server)
+    store_module = importlib.import_module(f"{node_package}.store")
+    monkeypatch.setattr(store_module, "cache_dir", lambda: tmp_path)
+    monkeypatch.delitem(sys.modules, f"{node_package}.routes", raising=False)
+    module = importlib.import_module(f"{node_package}.routes")
+    return module, recorder
+
+
+def build_source(directory):
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "tags.bin.gz"
+    import gzip
+
+    raw = encode(TagSet(threshold=25, tags=(TagEntry("1girl", 0, 10, False),), aliases=(), alias_target=()))
+    with open(path, "wb") as handle:
+        with gzip.GzipFile(fileobj=handle, mode="wb", mtime=0) as stream:
+            stream.write(raw)
+    (directory / "metadata.json").write_text(json.dumps({"data_version": "2026.09.22"}), encoding="utf-8")
+    return path
+
+
+def test_all_routes_are_registered(routes):
+    _, recorder = routes
+    assert set(recorder.handlers) == {
+        ("GET", "/danbooru-tag-autocomplete/status"),
+        ("GET", "/danbooru-tag-autocomplete/db"),
+        ("GET", "/danbooru-tag-autocomplete/custom"),
+    }
+
+
+def test_status_reports_ready_with_a_local_artifact(routes, tmp_path, monkeypatch):
+    module, recorder = routes
+    monkeypatch.setenv("DTA_LOCAL_ARTIFACT", str(build_source(tmp_path / "generated")))
+
+    response = importlib.import_module("asyncio").run(
+        recorder.handlers[("GET", "/danbooru-tag-autocomplete/status")](FakeRequest())
+    )
+
+    assert response.status == 200
+    assert json.loads(response.body) == {"state": "ready", "dataVersion": "2026.09.22", "error": None}
+
+
+def test_db_serves_the_artifact_with_gzip_encoding(routes, tmp_path, monkeypatch):
+    module, recorder = routes
+    source = build_source(tmp_path / "generated")
+    monkeypatch.setenv("DTA_LOCAL_ARTIFACT", str(source))
+
+    response = importlib.import_module("asyncio").run(
+        recorder.handlers[("GET", "/danbooru-tag-autocomplete/db")](FakeRequest())
+    )
+
+    assert response.status == 200
+    assert response.headers["Content-Encoding"] == "gzip"
+    assert response.headers["Content-Type"] == "application/octet-stream"
+    assert response.headers["Cache-Control"] == "no-cache"
+
+
+def test_db_returns_404_without_an_artifact(routes, tmp_path, monkeypatch):
+    module, recorder = routes
+    monkeypatch.setenv("DTA_LOCAL_ARTIFACT", str(tmp_path / "generated" / "tags.bin.gz"))
+
+    response = importlib.import_module("asyncio").run(
+        recorder.handlers[("GET", "/danbooru-tag-autocomplete/db")](FakeRequest())
+    )
+
+    assert response.status == 404
+    assert "error" in json.loads(response.body)
+
+
+def test_custom_returns_the_overlay_payload(routes, tmp_path, monkeypatch):
+    module, recorder = routes
+    monkeypatch.setenv("DTA_LOCAL_ARTIFACT", str(build_source(tmp_path / "generated")))
+
+    response = importlib.import_module("asyncio").run(
+        recorder.handlers[("GET", "/danbooru-tag-autocomplete/custom")](FakeRequest())
+    )
+
+    assert response.status == 200
+    assert json.loads(response.body) == {"available": False, "warnings": [], "bytes": None}
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `.venv/bin/python -m pytest tests/test_routes.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'dta_node.routes'`
+
+- [ ] **Step 3: Write `routes.py`**
+
+```python
+"""HTTP routes serving the tag artifact to the browser."""
+
+from __future__ import annotations
+
+from aiohttp import web
+from server import PromptServer
+
+from . import store
+
+PREFIX = "/danbooru-tag-autocomplete"
+
+
+async def status_route(request: web.Request) -> web.Response:
+    current = store.status()
+    if current.state == store.STATE_MISSING:
+        store.ensure_download()
+        current = store.status()
+    return web.json_response(
+        {"state": current.state, "dataVersion": current.data_version, "error": current.error}
+    )
+
+
+async def db_route(request: web.Request) -> web.Response:
+    path = store.artifact_path()
+    if not path.exists():
+        return web.json_response({"error": "tag database is not available"}, status=404)
+    response = web.FileResponse(path)
+    response.headers["Content-Type"] = "application/octet-stream"
+    response.headers["Cache-Control"] = "no-cache"
+    encoding = store.artifact_content_encoding()
+    if encoding is not None:
+        response.headers["Content-Encoding"] = encoding
+    return response
+
+
+async def custom_route(request: web.Request) -> web.Response:
+    return web.json_response(store.custom_payload())
+
+
+def register_routes(app_routes) -> None:
+    app_routes.get(f"{PREFIX}/status")(status_route)
+    app_routes.get(f"{PREFIX}/db")(db_route)
+    app_routes.get(f"{PREFIX}/custom")(custom_route)
+
+
+register_routes(PromptServer.instance.routes)
+```
+
+- [ ] **Step 4: Write `__init__.py`**
+
+```python
+"""Danbooru tag autocomplete for ComfyUI."""
+
+from __future__ import annotations
+
+from .nodes import DanbooruTagSearch
+
+WEB_DIRECTORY = "./web"
+
+NODE_CLASS_MAPPINGS = {"DanbooruTagSearch": DanbooruTagSearch}
+NODE_DISPLAY_NAME_MAPPINGS = {"DanbooruTagSearch": "Danbooru Tag Search"}
+
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
+
+from . import routes  # noqa: E402,F401  registers the HTTP routes on import
+```
+
+- [ ] **Step 5: Run the route tests to verify they pass**
+
+Run: `.venv/bin/python -m pytest tests/test_routes.py -v`
+Expected: PASS (5 passed)
+
+- [ ] **Step 6: Verify the package imports the way ComfyUI loads it**
+
+Run:
+```bash
+.venv/bin/python - <<'PY'
+import importlib.util
+import pathlib
+import sys
+import types
+
+root = pathlib.Path(".").resolve()
+server = types.ModuleType("server")
+server.PromptServer = types.SimpleNamespace(instance=types.SimpleNamespace(routes=types.SimpleNamespace(get=lambda path: lambda handler: handler)))
+sys.modules["server"] = server
+folder_paths = types.ModuleType("folder_paths")
+folder_paths.get_user_directory = lambda: "/tmp"
+sys.modules["folder_paths"] = folder_paths
+
+# Execute __init__.py the way ComfyUI does: as a package, so its relative imports resolve.
+spec = importlib.util.spec_from_file_location(
+    "dta_probe", root / "__init__.py", submodule_search_locations=[str(root)]
+)
+module = importlib.util.module_from_spec(spec)
+sys.modules["dta_probe"] = module
+spec.loader.exec_module(module)
+
+print("WEB_DIRECTORY", module.WEB_DIRECTORY)
+print("NODES", sorted(module.NODE_CLASS_MAPPINGS))
+print("DISPLAY", list(module.NODE_DISPLAY_NAME_MAPPINGS.values()))
+PY
+```
+Expected: prints `WEB_DIRECTORY ./web`, `NODES ['DanbooruTagSearch']`, `DISPLAY ['Danbooru Tag Search']`.
+A probe that pre-inserts a hand-built `dta_probe` module into `sys.modules` would not
+execute `__init__.py` at all and therefore would verify nothing.
+
+- [ ] **Step 7: Run the full suite and commit**
+
+Run: `.venv/bin/python -m pytest -q`
+Expected: PASS
+
+```bash
+git add routes.py __init__.py tests/test_routes.py pyproject.toml
+git commit -m "Add tag database HTTP routes"
 ```
 
 ---
