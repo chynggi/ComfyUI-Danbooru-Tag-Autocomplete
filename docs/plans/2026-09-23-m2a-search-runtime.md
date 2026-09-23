@@ -1518,6 +1518,24 @@ def test_custom_payload_survives_an_oversized_csv_field(store, tmp_path, monkeyp
     assert payload["available"] is False
     assert payload["warnings"]
     assert store.load_index().search("blue_h")[0].name == "blue_hair"
+
+
+def test_download_records_an_error_when_the_thread_cannot_start(store, monkeypatch):
+    class FailingThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("no threads available")
+
+    monkeypatch.setattr(store.threading, "Thread", FailingThread)
+
+    store.ensure_download()
+    status = store.status()
+
+    assert status.state == store.STATE_ERROR
+    assert "download thread" in status.error
+    assert not store.artifact_path().exists()
 ```
 
 - [ ] **Step 4: Run the tests to verify they fail**
