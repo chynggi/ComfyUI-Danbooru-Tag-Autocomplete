@@ -1843,7 +1843,27 @@ can be pasted in. Each term is searched independently and the results are merged
 re-sorted globally by the chosen order. Alias and deprecated matches always report the
 canonical tag name.
 
-- [ ] **Step 1: Write the failing node tests**
+- [ ] **Step 1: Keep pytest out of the node package, then write the failing node tests**
+
+`__init__.py` is the ComfyUI entry point, so the repository root is a Python package. Left
+alone, pytest imports it during the run, and its relative imports fail outside ComfyUI's
+loader (`ImportError: attempted relative import with no known parent package`), which turns
+every test into a setup error. Limit conftest discovery to `tests/` so pytest never walks up
+into it. Add to `pyproject.toml`:
+
+```toml
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The repository root holds the node's __init__.py, which pytest otherwise imports as a
+# package during collection; its relative imports only resolve under ComfyUI's loader.
+addopts = "--confcutdir=tests"
+markers = [
+    "slow: exercises a full-size synthetic artifact; run with -m slow",
+]
+```
+
+Verify: `.venv/bin/python -m pytest -q` must collect and pass rather than error. If it
+errors, stop and report — do not work around it by moving `__init__.py`.
 
 Create `tests/test_nodes.py`:
 
@@ -2049,7 +2069,6 @@ git commit -m "Add Danbooru Tag Search node"
 - Create: `routes.py`
 - Create: `__init__.py`
 - Create: `tests/test_routes.py`
-- Modify: `pyproject.toml` (add `addopts = "--confcutdir=tests"`)
 
 **Interfaces:**
 - Consumes: `store.status`, `store.ensure_download`, `store.artifact_path`, `store.artifact_content_encoding`, `store.custom_payload`, `store.STATE_MISSING`
@@ -2064,29 +2083,9 @@ git commit -m "Add Danbooru Tag Search node"
 `register_routes(app_routes)` takes the route table as a parameter so the tests can pass a
 recorder instead of `PromptServer.instance.routes`.
 
-- [ ] **Step 1: Install the test-only HTTP dependency, keep pytest out of the node package, and write the failing route tests**
+- [ ] **Step 1: Install the test-only HTTP dependency and write the failing route tests**
 
 Run: `uv pip install --python .venv/bin/python aiohttp`
-
-`__init__.py` is the ComfyUI entry point, so the repository root is a Python package. Left
-alone, pytest imports it during the run, and its relative imports fail outside ComfyUI's
-loader (`ImportError: attempted relative import with no known parent package`), which turns
-every test into a setup error. Limit conftest discovery to `tests/` so pytest never walks up
-into it. Add to `pyproject.toml`:
-
-```toml
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-# The repository root holds the node's __init__.py, which pytest otherwise imports as a
-# package during collection; its relative imports only resolve under ComfyUI's loader.
-addopts = "--confcutdir=tests"
-markers = [
-    "slow: exercises a full-size synthetic artifact; run with -m slow",
-]
-```
-
-Verify the suite still runs before going further: `.venv/bin/python -m pytest -q` should
-collect and pass, not error.
 
 The route tests stub `server` so they can exercise the handlers without a running
 ComfyUI. `aiohttp` is a ComfyUI runtime dependency; installing it in this project's venv
@@ -2331,7 +2330,7 @@ Run: `.venv/bin/python -m pytest -q`
 Expected: PASS
 
 ```bash
-git add routes.py __init__.py tests/test_routes.py pyproject.toml
+git add routes.py __init__.py tests/test_routes.py
 git commit -m "Add tag database HTTP routes"
 ```
 
