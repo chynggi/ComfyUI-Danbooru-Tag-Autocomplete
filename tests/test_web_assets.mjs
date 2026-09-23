@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -9,7 +9,12 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const WEB = join(REPO_ROOT, "web");
 
 function webModules() {
-  return readdirSync(WEB).filter((name) => name.endsWith(".js")).sort();
+  // Model how ComfyUI collects extensions: server.py globs `**/*.js` under the web directory,
+  // so a module in a subdirectory is loaded too and has to be checked here.
+  return readdirSync(WEB, { recursive: true })
+    .filter((name) => name.endsWith(".js"))
+    .map((name) => name.split(sep).join("/"))
+    .sort();
 }
 
 test("every browser module parses", () => {
@@ -36,7 +41,9 @@ test("the only outside imports are ComfyUI's own frontend modules", () => {
   // `../../scripts/*.js` is not on disk inside this repo: ComfyUI serves the frontend from its
   // own package at /scripts/, and this module is loaded from /extensions/danbooruTagAutocomplete/,
   // so the path is correct at runtime and unresolvable from here. Pin the allowed set to the two
-  // modules the extension actually needs, so a typo or an accidental new dependency is caught.
+  // modules the extension actually needs, so a typo is caught. The pattern sees a double-quoted
+  // relative specifier, which is the only import form this repo uses; a bare package specifier,
+  // a side-effect import or a dynamic import would each need their own check.
   const allowed = new Set(["../../scripts/app.js", "../../scripts/widgets.js"]);
   for (const name of webModules()) {
     const source = readFileSync(join(WEB, name), "utf8");

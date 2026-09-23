@@ -48,10 +48,11 @@ The browser behaviour is verified by hand, as the design specifies. Run ComfyUI,
 - Typing a plain sentence with no matches leaves the field exactly as before: no interception,
   no swallowed keys, no flicker.
 - With Nodes 2.0 (`Modern Node Design`) enabled, the same checks pass.
-- With `DanbooruTagAutocomplete.Enabled` off, no list ever appears.
+- With `Enable tag autocomplete` turned off in the settings, no list ever appears.
 - With another autocomplete extension active, this one stays off and logs why; turning on
-  `ForceEnableWithOtherAutocomplete` makes it appear.
-- Deleting `user/danbooru-tag-autocomplete/` and reloading downloads it again and then works.
+  `Enable alongside another autocomplete` makes it appear.
+- Deleting `user/danbooru-tag-autocomplete/` and reloading the page starts a fresh download, and
+  suggestions come back once it has finished.
 - With the download blocked (offline), a dismissible banner explains why and typing still works.
 - A `user/danbooru-tag-autocomplete/custom_tags.csv` with `my_tag,general,0,` and
   `my_old,general,0,my_tag` makes `my_old` suggest `my_tag`.
