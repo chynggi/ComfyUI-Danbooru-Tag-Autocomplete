@@ -175,7 +175,7 @@ test("planInsertion replaces the whole run a caret sits inside", () => {
     end: 15,
     replacement: "blue_hair, ",
     text: "1girl, blue_hair, ",
-    caret: 17,
+    caret: 18,
   });
 });
 
@@ -187,6 +187,8 @@ test("planInsertion's own text and caret agree with splicing its replacement", (
   const cases = [
     ["1girl, blue_h", 13, "blue_hair"],
     ["1girl, blue_h, solo", 13, "blue_hair"],
+    ["1girl, blue_h , x", 13, "blue_hair"],
+    ["1girl, blue_h x", 13, "blue_hair"],
     ["blue_hair, 1girl", 4, "blue"],
     ["", 0, "1girl"],
   ];
