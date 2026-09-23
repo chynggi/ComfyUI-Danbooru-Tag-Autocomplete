@@ -843,14 +843,37 @@ unaffected.
 Recorded so a future change can be compared against them. Local figures are from the development
 machine; CI figures are from `ubuntu-latest` on 2026-09-23.
 
-| Gate | Local | CI | Budget |
+| Gate | Local | CI, successful run | Budget |
 |---|---|---|---|
-| `test_full_size_decode_and_long_prefix_latency` (1.71 M synthetic, long prefixes) | decode 0.37 s, p95 2.22 ms | decode 0.549 s, p95 3.35 ms | 5 s, 50 ms |
-| `test_shipped_profile_short_prefix_latency` (1.71 M synthetic, distributed prefixes) | 1-char 39.33 ms, 2-char 0.01 ms | 1-char 57.82 ms, 2-char 0.01 ms | 75 ms |
-| `test_real_artifact_short_prefix_latency` (the shipped 193,803-tag artifact) | 1-char 20.56 ms, 2-char 1.96 ms | 1-char 30.25 ms, 2-char 2.86 ms | 50 ms |
+| `test_full_size_decode_and_long_prefix_latency` (1.71 M synthetic, long prefixes) | decode 0.37 s, p95 2.22 ms | decode 0.559 s, p95 3.35 ms | 5 s, 50 ms |
+| `test_shipped_profile_short_prefix_latency` (1.71 M synthetic, distributed prefixes) | 1-char 39.33 ms, 2-char 0.01 ms | 1-char 55.48 ms, 2-char 0.01 ms | 75 ms |
+| `test_real_artifact_short_prefix_latency` (the shipped 193,803-tag artifact) | 1-char 20.56 ms, 2-char 2.96 ms | 1-char 28.77 ms, 2-char 2.77 ms | 50 ms |
 
 CI is roughly 1.5 times slower than the development machine on these measurements, which is the
-figure to keep in mind when reading them.
+figure to keep in mind when reading them. The run that failed before the budget was split measured
+57.82 ms on the synthetic gate and 30.25 ms on the real-artifact gate.
+
+### Publication details
+
+- The first successful dispatch published `data-2026.09.23` with `tags.bin.gz` (2,316,419 bytes) and
+  `metadata.json`, and committed `data/latest.json` back to `main` — the decide step reported
+  `data 2026.09.23: changed=true release_exists=false publish=true`, so both publish conditions were
+  genuinely true on the first run, exactly as the ruling above anticipated.
+- The live path was then verified with no `DTA_*` overrides: the committed pointer was fetched from
+  `raw.githubusercontent.com`, the artifact downloaded from the release, its `sha256` matched the
+  pointer, and searches returned real tags. This is the first exercise of the production download
+  path in the project's history; M1 through M2b all used `DTA_LOCAL_ARTIFACT`.
+- **A fresh publish is not visible immediately.** `raw.githubusercontent.com` serves the pointer with
+  `cache-control: max-age=300`, so for up to five minutes after a data release the runtime can read
+  the previous pointer. The first live check failed on exactly that, 404ing against the release
+  `data-2026.09.22` that never existed. In steady state this is harmless — the previous release is
+  still present, so a stale pointer means slightly older data — but it does mean a data update can
+  take a few minutes to reach a running install.
+- **A data release is marked "Latest" while no code release exists.** `--latest=false` is applied on
+  the create path, which stops a data release from displacing a later one, but GitHub's
+  `/releases/latest` endpoint falls back to the most recent published release when none is flagged,
+  so `data-2026.09.23` currently holds that badge. Cutting a `v*` code release ends it. The tag
+  prefix, not the badge, is what separates the two kinds of release.
 
 ## M3 completion criteria
 
@@ -858,7 +881,9 @@ figure to keep in mind when reading them.
 - `.github/workflows/update-data.yml` exists, parses, and its steps run in the order fetch → build →
   validate → test → decide → publish → commit.
 - A manual dispatch of the workflow succeeds and publishes the `data-<data_version>` release the
-  build produced, with both assets and `latest=false`.
+  build produced, with both assets. `--latest=false` is applied, which stops a data release from
+  taking the badge from a code release; while no code release exists, GitHub still reports the newest
+  published release as latest, so that badge alone is not the criterion — the `data-*` tag prefix is.
 - The repository's `data/latest.json` was refreshed by the run, names that release, and matches its
   artifact's `sha256` — which means the pointer changed from `2026.09.22` to the newer data day.
 - The live download path works with no `DTA_*` overrides: the pointer URL resolves, the artifact
