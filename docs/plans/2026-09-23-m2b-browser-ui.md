@@ -1731,8 +1731,8 @@ def status() -> Status:
         return Status(_state, _data_version(), _error)
 ```
 
-The existence check moves inside the lock so the whole decision is atomic; `_data_version()` was
-already called under the lock. Nothing else changes: files present and not downloading is still
+The existence check is computed before the lock and the decision is made inside it, which is what
+the original did too; `_data_version()` was already called under the lock. Nothing else changes: files present and not downloading is still
 `READY` whether or not a download is in flight, and a failed download is still `ERROR` and is still
 not retried automatically.
 
