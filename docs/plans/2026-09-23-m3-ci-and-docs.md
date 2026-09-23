@@ -1,0 +1,750 @@
+# Danbooru Tag Autocomplete — M3 CI, Profiles, and Docs Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** The tag database updates itself on a schedule, publishes the release asset that
+`data/latest.json` names, and the repository documents how to install, configure and verify the
+extension — all without a code update in the loop.
+
+**Architecture:** A GitHub Actions workflow fetches the upstream datasets, builds the artifact,
+runs the *whole* test suite including the gates that need a built artifact, and publishes only
+when there is something to publish. The build script gains one flag so the committed pointer is a
+build output rather than hand-written JSON, which is also what lets the workflow detect "nothing
+changed" with `git diff` instead of a bespoke comparison.
+
+**Tech Stack:** GitHub Actions on `ubuntu-latest`, Python 3.13, `gh` CLI for releases (preinstalled
+on the runner, so no third-party action is pinned). Build dependencies are `requests`, `pyarrow`,
+`pyyaml` and `pytest`; the node's runtime dependencies stay at zero.
+
+**Spec:** `docs/specs/2026-09-22-tag-autocomplete-design.md` (§12 CI and releases, §13.1 profiles,
+§15 tests, §16 milestones)
+
+**Predecessors:** M1 (`docs/plans/2026-09-22-m1-data-pipeline.md`) built the pipeline, M2a the search
+core and runtime, M2b the browser UI. All three are merged. M2b's plan lists what it carries into
+this milestone under "Carried forward".
+
+## Global Constraints
+
+- Project license: MIT.
+- The node's runtime dependencies stay at **zero**. Build-only dependencies belong in the workflow,
+  never in `requirements.txt`.
+- Do not add third-party GitHub Actions beyond `actions/checkout` and `actions/setup-python`. Use
+  the runner's preinstalled `gh` for releases.
+- Data releases use the `data-*` tag prefix and must never become the repository's "latest" release;
+  code releases (`v*`) are cut by hand, separately.
+- The workflow's **test step runs after the build step**, so the real-artifact gate and all three
+  latency gates execute. This is a carried requirement from M1 (item I4).
+- **Latency budgets are asserted, never adjusted by an implementer.** All three gates compare
+  against 50 ms. On the development machine the distributed one-character gate measures 39.79 ms,
+  which is the tight one. If CI exceeds the budget, the implementer records the number and reports
+  it for a controller ruling; changing a budget is not a fix.
+- Commit message style: `Add ...`, `Fix ...`, `Use ...`, `Remove ...`, `Update ...`.
+- Never modify files outside `custom_nodes/ComfyUI-Danbooru-Tag-Autocomplete`.
+
+## File Structure
+
+| File | Responsibility |
+|---|---|
+| `build/build_database.py` (modify) | gains `write_latest` and the two CLI flags that produce the committed pointer |
+| `tests/test_build.py` (modify) | three tests for that function and its wiring |
+| `.github/workflows/update-data.yml` (create) | the scheduled data pipeline and release |
+| `README.md` (modify) | install, how the data updates, profiles, custom tags, licence |
+| `docs/plans/2026-09-23-m3-ci-and-docs.md` (create) | this plan |
+
+## Rulings made before execution
+
+- **Ruling: no invented model profiles.** Spec §13.1 names `illustrious`/`noobai`/`pony`/`wai` as
+  "the same database with filtering and extra tag sources", but specifies no filter values, and
+  those ecosystems share the Danbooru tag set. Adding four near-identical YAML files would be
+  fabricated configuration. Instead the profile mechanism is documented in the README as the
+  extension point it is, and its behaviour is already pinned by `tests/test_build.py`. — Why: the
+  project rejects unverified assumptions, and a profile that behaves exactly like the default is
+  noise a reader has to check. — Cost if wrong: a user wanting a model-specific filter writes four
+  lines of YAML using the documented keys; nothing is blocked.
+- **Ruling: the workflow publishes when the data changed *or* when the release is missing.** The
+  spec says to compare the built `sha256` against `data/latest.json` and stop when they match, which
+  assumes the release already exists. It does not: the repository has no releases at all, and the
+  committed pointer already matches what the build produces, so a literal implementation would skip
+  publishing forever and the download URL would stay dead. — Cost if wrong: one extra release
+  publish on a run where nothing changed, which is idempotent (`gh release upload --clobber`).
+- **Ruling: change detection uses `git diff`, not a Python comparison.** Because every value in
+  `data/latest.json` comes from the build and gzip is deterministic (M1 verified this), an unchanged
+  upstream produces a byte-identical file, so `git diff --quiet -- data/latest.json` is the whole
+  comparison. — Cost if wrong: none; it is the same predicate with less code, and Task 1 adds a test
+  pinning the byte-identity property it depends on.
+- **Ruling: `--repo-slug` is explicit rather than read from the environment** inside the build
+  script. The workflow passes `$GITHUB_REPOSITORY`. — Cost if wrong: a local invocation that forgets
+  the flag gets a clear `parser.error` instead of a silently wrong URL.
+
+---
+
+### Task 1: Write the committed data pointer from the build
+
+**Files:**
+- Modify: `build/build_database.py`
+- Modify: `tests/test_build.py`
+
+**Interfaces:**
+- Consumes: the `metadata` dict `write_artifacts` returns.
+- Produces:
+  - `write_latest(metadata: dict, path: Path, repo_slug: str) -> Path` — writes
+    `{"data_version", "profile", "sha256", "size", "url"}` with a trailing newline and returns the
+    path. `url` is
+    `https://github.com/<repo_slug>/releases/download/data-<data_version>/tags.bin.gz`.
+  - `main` gains `--latest-json PATH` and `--repo-slug OWNER/NAME`. Given the first, the second is
+    required; the pointer is written only after validation succeeds.
+
+**Why it is a build flag.** The pointer already exists in the repository, hand-written during M1.
+Moving it into the build gives it one source of truth (the artifact it describes), makes the URL
+shape testable, and is what lets the workflow's change detection be a `git diff`.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `tests/test_build.py`:
+
+```python
+LATEST_METADATA = {
+    "data_version": "2026.09.22",
+    "profile": "danbooru",
+    "artifact": {"sha256": "d4" * 32, "size": 2315906},
+}
+
+
+def test_write_latest_records_the_release_pointer(tmp_path):
+    path = write_latest(LATEST_METADATA, tmp_path / "latest.json", "owner/name")
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "data_version": "2026.09.22",
+        "profile": "danbooru",
+        "sha256": "d4" * 32,
+        "size": 2315906,
+        "url": "https://github.com/owner/name/releases/download/data-2026.09.22/tags.bin.gz",
+    }
+    assert path.read_bytes().endswith(b"\n")
+
+
+def test_write_latest_is_byte_identical_for_the_same_build(tmp_path):
+    # The update workflow decides whether to publish by diffing this file, so the same build has to
+    # produce the same bytes.
+    first = write_latest(LATEST_METADATA, tmp_path / "a.json", "owner/name").read_bytes()
+    second = write_latest(LATEST_METADATA, tmp_path / "b.json", "owner/name").read_bytes()
+
+    assert first == second
+
+
+def test_main_writes_the_latest_pointer(tmp_path, monkeypatch):
+    from build import build_database
+
+    class StubSource:
+        def read(self, fetched):
+            return hlibr_data()
+
+    monkeypatch.setattr(build_database, "fetch_all", lambda names, cache: [object()])
+    monkeypatch.setattr(build_database, "SOURCE_ORDER", ("hlibr",))
+    monkeypatch.setattr(build_database, "SOURCES", {"hlibr": StubSource})
+
+    out = tmp_path / "generated"
+    latest = tmp_path / "data" / "latest.json"
+    code = build_database.main([
+        "--profile", str(FIXTURE_PROFILE),
+        "--out", str(out),
+        "--latest-json", str(latest),
+        "--repo-slug", "owner/name",
+    ])
+
+    assert code == 0
+    metadata = json.loads((out / "metadata.json").read_text(encoding="utf-8"))
+    payload = json.loads(latest.read_text(encoding="utf-8"))
+    assert payload["data_version"] == metadata["data_version"]
+    assert payload["sha256"] == metadata["artifact"]["sha256"]
+    assert payload["url"] == (
+        f"https://github.com/owner/name/releases/download/data-{payload['data_version']}/tags.bin.gz"
+    )
+```
+
+Add `write_latest` to the existing import from `build.build_database` at the top of the file.
+
+- [ ] **Step 2: Run them to verify they fail**
+
+Run: `.venv/bin/python -m pytest tests/test_build.py -q -k latest`
+Expected: collection error, `ImportError: cannot import name 'write_latest'`
+
+- [ ] **Step 3: Write `write_latest` and wire the flags**
+
+Add after `write_artifacts` in `build/build_database.py`:
+
+```python
+def write_latest(metadata: dict, path: Path, repo_slug: str) -> Path:
+    """Write the committed pointer the runtime reads to find the current artifact.
+
+    Every value comes from the build, so an unchanged upstream produces a byte-identical file,
+    which is what lets the update workflow decide whether to publish with a plain git diff.
+    """
+    version = metadata["data_version"]
+    payload = {
+        "data_version": version,
+        "profile": metadata["profile"],
+        "sha256": metadata["artifact"]["sha256"],
+        "size": metadata["artifact"]["size"],
+        "url": f"https://github.com/{repo_slug}/releases/download/data-{version}/tags.bin.gz",
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return path
+```
+
+In `main`, after the two `add_argument` calls for `--out` and `--data-version`:
+
+```python
+    parser.add_argument("--latest-json", default=None, help="also write the committed data pointer here")
+    parser.add_argument("--repo-slug", default=None, help="owner/name used to build the release URL")
+```
+
+and immediately after the validation block's `return 1` (so the pointer is written only on success):
+
+```python
+    if args.latest_json:
+        if not args.repo_slug:
+            parser.error("--latest-json needs --repo-slug")
+        write_latest(metadata, Path(args.latest_json), args.repo_slug)
+```
+
+- [ ] **Step 4: Run them to verify they pass**
+
+Run: `.venv/bin/python -m pytest tests/test_build.py -q`
+Expected: PASS (23 tests, 20 existing + 3 new)
+
+- [ ] **Step 5: Verify the committed pointer is exactly what the build produces**
+
+Run:
+
+```bash
+.venv/bin/python build/build_database.py --profile profiles/danbooru.yaml --out generated \
+  --latest-json data/latest.json --repo-slug chynggi/ComfyUI-Danbooru-Tag-Autocomplete
+git diff --exit-code -- data/latest.json && echo "UNCHANGED: the committed pointer matches the build"
+```
+
+Expected: the build prints `data_version=2026.09.22 sha256=d48a2b1b…`, then
+`UNCHANGED: the committed pointer matches the build`. This also demonstrates the exact predicate the
+workflow will use, and that this repository's next data build has nothing new to publish.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add build/build_database.py tests/test_build.py
+git commit -m "Write the data pointer from the build"
+```
+
+---
+
+### Task 2: The scheduled data workflow
+
+**Files:**
+- Create: `.github/workflows/update-data.yml`
+
+**Interfaces:**
+- Consumes: the `build/fetch_upstream.py`, `build/build_database.py` (including `--latest-json` and
+  `--repo-slug`), and `build/validate_database.py` CLIs, plus the test suite.
+- Produces: a workflow named `Update tag data` with a daily schedule and a manual dispatch; on a
+  successful run it publishes the release `data-<data_version>` holding `tags.bin.gz` and
+  `metadata.json`, and commits the matching `data/latest.json`.
+
+**Order matters, and the spec's order is not quite the right one.** The spec lists validate before
+publish, which is correct, but it puts the comparison before everything else and has no test step.
+The test step must come after the build, and the comparison must also account for a missing release.
+Write the job in this order: fetch → build → validate → **test** → decide → publish → commit.
+
+- [ ] **Step 1: Write the workflow**
+
+Create `.github/workflows/update-data.yml`:
+
+```yaml
+name: Update tag data
+
+on:
+  schedule:
+    # 18:00 UTC, which is 03:00 KST.
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# A manual dispatch during the nightly run must not race it for the release or the pointer commit.
+concurrency:
+  group: update-data
+  cancel-in-progress: false
+
+jobs:
+  data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          # The job commits and pushes the pointer, so give it real history rather than a
+          # single-commit shallow clone.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install the build dependencies
+        # Build-only. The node's own runtime dependencies stay at zero.
+        run: python -m pip install --disable-pip-version-check requests pyarrow pyyaml pytest
+
+      - name: Fetch the upstream datasets
+        run: python build/fetch_upstream.py --cache data/raw
+
+      - name: Build the artifact and the committed pointer
+        run: >-
+          python build/build_database.py
+          --profile profiles/danbooru.yaml
+          --out generated
+          --latest-json data/latest.json
+          --repo-slug "$GITHUB_REPOSITORY"
+
+      - name: Validate the artifact
+        run: >-
+          python build/validate_database.py
+          --artifact generated/tags.bin.gz
+          --metadata generated/metadata.json
+
+      - name: Test
+        # Deliberately after the build. The real-artifact gate and all three latency gates only run
+        # once generated/tags.bin.gz exists, and they are this project's performance contract.
+        # -s keeps the printed p95 numbers in the log, which is where the CI figures are read from.
+        run: python -m pytest -q -s
+
+      - name: Decide whether to publish
+        id: publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version=$(python -c "import json; print(json.load(open('generated/metadata.json'))['data_version'])")
+          tag="data-$version"
+          changed=false
+          git diff --quiet -- data/latest.json || changed=true
+          exists=true
+          gh release view "$tag" >/dev/null 2>&1 || exists=false
+          # Publish when the data changed, and also when the pointer already matches but the
+          # release it names is missing: otherwise the download URL would stay dead until the
+          # next upstream change, which may be days away.
+          publish=false
+          if [ "$changed" = true ] || [ "$exists" = false ]; then publish=true; fi
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "publish=$publish"
+            echo "changed=$changed"
+            echo "exists=$exists"
+          } >> "$GITHUB_OUTPUT"
+          echo "data $version: changed=$changed release_exists=$exists publish=$publish"
+
+      - name: Publish the data release
+        if: steps.publish.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ steps.publish.outputs.tag }}"
+          gh release view "$tag" >/dev/null 2>&1 \
+            || gh release create "$tag" --title "$tag" \
+                 --notes "Danbooru tag data ${{ steps.publish.outputs.version }}" --latest=false
+          gh release upload "$tag" generated/tags.bin.gz generated/metadata.json --clobber
+
+      - name: Commit the pointer
+        if: steps.publish.outputs.publish == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/latest.json
+          git diff --cached --quiet \
+            || git commit -m "Update tag data to ${{ steps.publish.outputs.version }}"
+          git push
+```
+
+- [ ] **Step 2: Run the job's steps locally, in the same order**
+
+The workflow's YAML cannot be executed here, but every command inside it can. Run them from the
+repository root, reusing the existing `data/raw` cache:
+
+```bash
+.venv/bin/python build/fetch_upstream.py --cache data/raw
+.venv/bin/python build/build_database.py --profile profiles/danbooru.yaml --out generated \
+  --latest-json data/latest.json --repo-slug chynggi/ComfyUI-Danbooru-Tag-Autocomplete
+.venv/bin/python build/validate_database.py --artifact generated/tags.bin.gz --metadata generated/metadata.json
+.venv/bin/python -m pytest -q -s
+git diff --quiet -- data/latest.json && echo "changed=false" || echo "changed=true"
+```
+
+Expected: the fetch reports both source revisions, the build prints `data_version=2026.09.22` and the
+same `sha256`, validate prints `validation passed`, the suite is `158 passed` with the three
+`p95=` lines visible, and the last line prints `changed=false` because the committed pointer already
+matches. Record those three p95 numbers; they are the local baseline for Task 4.
+
+Note the one value this cannot check locally: `$GITHUB_REPOSITORY` resolves to this repository only
+on the runner. Passing the same slug by hand is what makes the local run faithful.
+
+- [ ] **Step 3: Check the YAML parses and the shape is what GitHub expects**
+
+Run:
+
+```bash
+.venv/bin/python - <<'PY'
+import pathlib, yaml
+
+document = yaml.safe_load(pathlib.Path(".github/workflows/update-data.yml").read_text())
+# PyYAML reads an unquoted `on:` as the boolean True, which is a YAML 1.1 quirk rather than an
+# error in the workflow, so both spellings have to be accepted here.
+triggers = document.get("on", document.get(True))
+print(sorted(triggers))
+print(list(document["jobs"]))
+print([step["name"] for step in document["jobs"]["data"]["steps"]])
+PY
+```
+Expected: `['schedule', 'workflow_dispatch']`, `['data']`, and the eight step names in order.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add .github/workflows/update-data.yml
+git commit -m "Add the scheduled data workflow"
+```
+
+---
+
+### Task 3: The README
+
+**Files:**
+- Modify: `README.md`
+
+**Interfaces:**
+- Consumes: the settings the extension registers, the profile keys `load_profile` reads, the
+  `DTA_*` environment overrides, and the two CLIs the workflow runs.
+- Produces: a README that takes a reader from install to verification.
+
+**One section is not retyped here.** `## Browser checklist` was finalised in M2b and is the gate for
+the browser behaviour; the marker below shows where it goes. Copy it from the current `README.md`
+byte for byte, along with nothing else — the sections `## Custom tags` and `## Building the tag
+database yourself` are rewritten below and must not be duplicated.
+
+- [ ] **Step 1: Replace `README.md`**
+
+````markdown
+# ComfyUI Danbooru Tag Autocomplete
+
+Danbooru tag autocomplete for ComfyUI, backed by Hugging Face tag metadata that updates itself
+daily. Type in a prompt field and the matching tags appear under the caret; press `Tab` to insert
+one.
+
+- Design: `docs/specs/2026-09-22-tag-autocomplete-design.md`
+- Plans: `docs/plans/`
+
+## Install
+
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/chynggi/ComfyUI-Danbooru-Tag-Autocomplete
+```
+
+Restart ComfyUI. On first run the extension downloads the tag database (about 2.3 MB) into
+ComfyUI's user directory under `danbooru-tag-autocomplete/`, and reuses it offline afterwards.
+There are no runtime dependencies to install and no build step. If the download is blocked, a
+banner explains why and the prompt fields keep working without suggestions.
+
+## Settings
+
+In ComfyUI's settings, under the `DanbooruTagAutocomplete` group:
+
+| Setting | Default | What it does |
+|---|---|---|
+| `Enable tag autocomplete` | on | turns the suggestions off entirely |
+| `Suggestion count` | 32 | how many rows the list shows |
+| `Insert with Tab` | on | accept the highlighted tag with `Tab` |
+| `Insert with Enter` | off | accept with `Enter` instead; off leaves `Enter` as a newline |
+| `Insert spaces instead of underscores` | off | writes `blue hair` rather than `blue_hair` |
+| `Show post counts` | on | shows each tag's post count |
+| `Category to show` | `all` | restrict the list to a single category |
+| `Enable alongside another autocomplete` | off | stay on when another autocomplete extension is installed |
+
+## How the tag data updates
+
+`data/latest.json` in this repository names the current release and its `sha256`. The extension
+reads that pointer, downloads `tags.bin.gz` from the release it names, verifies the hash, and caches
+it. Updating the tags therefore needs no code update: a scheduled workflow rebuilds from upstream
+every day at 03:00 KST and publishes a new `data-<version>` release only when something changed.
+
+The sources are `hlibr/danbooru-tag-metadata-snapshot` for the tag set, categories and aliases, and
+`HDiffusion/historical-danbooru-tag-counts` for daily post counts. Both are recorded with their
+revisions in each release's `metadata.json`.
+
+## Profiles
+
+A profile is a YAML file under `profiles/` that decides what the artifact contains:
+
+```yaml
+name: danbooru
+threshold: 25            # drop tags with fewer than this many posts
+exclude_categories: []   # category numbers to drop: 0 general, 1 artist, 3 copyright, 4 character, 5 meta
+exclude_deprecated: true # drop deprecated tags but keep their aliases
+extra_sources: []        # source ids merged on top of the defaults
+```
+
+`danbooru` is the default, and it covers the Danbooru tag set that Illustrious, NoobAI, Pony and WAI
+models are trained on, so no model-specific profile ships: without model tag lists of its own, such
+a file would only repeat the defaults. To build a narrower one — a higher threshold, or without
+meta tags — copy `profiles/danbooru.yaml`, edit it, and build with `--profile profiles/<name>.yaml`.
+`extra_sources` is the extension point for other boorus; a new source is a class under
+`build/sources/` registered in `build/fetch_upstream.py`.
+
+## Custom tags
+
+Put a `custom_tags.csv` in ComfyUI's user directory under `danbooru-tag-autocomplete/`. A row whose
+last column is empty declares a tag; a row whose last column holds names declares the row's name as
+an alias of the first of them, so `my_old,general,0,my_tag` means typing `my_old` suggests `my_tag`.
+A JSON file with the same shape is accepted instead. Custom entries win over the downloaded
+database.
+
+## Building the tag database yourself
+
+```bash
+uv venv --python 3.13 .venv
+uv pip install --python .venv/bin/python pytest pyarrow pyyaml requests
+.venv/bin/python build/fetch_upstream.py --cache data/raw
+.venv/bin/python build/build_database.py --profile profiles/danbooru.yaml --out generated
+.venv/bin/python build/validate_database.py --artifact generated/tags.bin.gz --metadata generated/metadata.json
+```
+
+## Tests
+
+```bash
+.venv/bin/python -m pytest -q                  # everything, including the latency gates
+.venv/bin/python -m pytest -m "not slow" -q    # skip the gates that build a 1.7M-tag set
+.venv/bin/python -m pytest tests/test_benchmark.py -m slow -v -s
+```
+
+The gates measure a synthetic set at upstream scale, a synthetic set at the shipped profile's scale,
+and the real artifact when `generated/tags.bin.gz` exists — which is why the update workflow builds
+before it tests.
+
+## Development overrides
+
+| Variable | Effect |
+|---|---|
+| `DTA_LOCAL_ARTIFACT` | use this `tags.bin.gz` instead of downloading |
+| `DTA_LATEST_URL` | read the pointer from this URL instead of the repository |
+| `DTA_REPO_SLUG` | override the repository slug used for release URLs |
+
+<!-- INSERT THE EXISTING `## Browser checklist` SECTION HERE, UNCHANGED -->
+
+## Licence
+
+MIT. The upstream dataset licences are recorded in each release's `metadata.json`.
+````
+
+- [ ] **Step 2: Put the checklist back, unchanged**
+
+Copy the `## Browser checklist` section out of the committed `README.md` and insert it at the marker,
+byte for byte. Do not reword it. Prove it survived:
+
+```bash
+git show main:README.md | sed -n '/^## Browser checklist/,/^## Custom tags/p' | head -n -1 > /tmp/opencode/checklist_before.md
+sed -n '/^## Browser checklist/,/^## Licence/p' README.md | head -n -1 > /tmp/opencode/checklist_after.md
+diff /tmp/opencode/checklist_before.md /tmp/opencode/checklist_after.md && echo "checklist unchanged"
+```
+
+Expected: `checklist unchanged`. Each extraction stops at the heading that follows the section, and
+`head -n -1` drops that heading, so the two files should hold exactly the section body.
+
+- [ ] **Step 3: Check the links and the facts that can be checked locally**
+
+Run each of these and confirm the output matches what the README claims:
+
+```bash
+gh release list                                   # the README says a release exists; after Task 4 it does
+cat data/latest.json                              # the pointer the "How the tag data updates" section describes
+ls profiles/                                      # the README says only danbooru ships
+grep -c "^| " README.md                           # 15: 8 settings + 3 variables + 4 header/separator rows
+```
+
+Expected: `data-2026.09.22` listed after Task 4, the committed pointer, only `danbooru.yaml`, and
+`15` from the last command — eight settings rows, three variable rows, and the two tables' four
+header and separator rows.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add README.md
+git commit -m "Document install, data updates and profiles"
+```
+
+---
+
+### Task 4: Push, run the workflow, and record the numbers
+
+**Files:**
+- Modify: `docs/plans/2026-09-23-m3-ci-and-docs.md` (the CI numbers)
+
+**Interfaces:**
+- Consumes: the workflow from Task 2, the release it publishes, and the pointer it commits.
+- Produces: a published `data-2026.09.22` release, a `data/latest.json` in the repository that names
+  it, and the CI latency figures recorded below.
+
+**Why the numbers get recorded.** M1 carried item I4: the distributed one-character gate measures
+39.79 ms locally against a 50 ms budget, and the budget must not be changed before a CI figure
+exists. This task produces that figure. If a gate fails on CI, **record it and stop** — a budget is
+asserted, never adjusted by whoever happens to be running the job.
+
+**This task has side effects on a public repository**, which is why it is the last one and why it
+runs only after everything else is merged and green.
+
+- [ ] **Step 1: Push**
+
+```bash
+git status --porcelain          # expect clean
+git log --oneline origin/main..main | wc -l
+git push origin main
+```
+
+Expected: the push succeeds and `gh run list --workflow update-data.yml` can now see the workflow.
+
+- [ ] **Step 2: Run the workflow**
+
+```bash
+gh workflow run update-data.yml
+sleep 5
+gh run list --workflow update-data.yml --limit 1
+```
+
+Then follow the run to completion:
+
+```bash
+gh run watch "$(gh run list --workflow update-data.yml --limit 1 --json databaseId -q '.[0].databaseId')"
+```
+
+Expected: `success`. If it fails, read the step that failed with
+`gh run view <id> --log-failed` and treat it as a defect in Task 1 or Task 2 — not as something to
+work around.
+
+One failure is environmental rather than a defect: if `main` is protected against direct pushes, the
+pointer commit is rejected. Two things then hold, and the plan relies on both. The release is still
+published, and the next run recomputes `changed` from the repository's own `data/latest.json`, which
+was never updated, so it tries the commit again. Either relax the protection for the bot or push the
+pointer by hand; do not "fix" it by skipping the commit.
+
+- [ ] **Step 3: Read the CI latency numbers out of the log**
+
+```bash
+gh run view <id> --log | grep -E "p95=|passed|changed=|data 2026"
+```
+
+Record the three lines:
+
+| Gate | What it measures | CI p95 | Budget |
+|---|---|---|---|
+| `test_full_size_decode_and_long_prefix_latency` | 1.71 M synthetic tags, long prefixes | | 50 ms |
+| `test_shipped_profile_short_prefix_latency` | shipped scale, distributed 1- and 2-character prefixes | | 50 ms |
+| `test_real_artifact_short_prefix_latency` | the real 193,803-tag artifact | | 50 ms |
+
+The second row is carried item I4. Its local figure is 39.79 ms (1-char) and 0.01 ms (2-char).
+
+- [ ] **Step 4: Verify the published release**
+
+```bash
+gh release view data-2026.09.22
+gh release view data-2026.09.22 --json assets -q '.assets[].name'
+gh release view data-2026.09.22 --json isLatest,isPrerelease -q '"latest=\(.isLatest) prerelease=\(.isPrerelease)"'
+```
+
+Expected: both `tags.bin.gz` and `metadata.json` present, and **`latest=false`**, because a data
+release must never become the repository's latest release.
+
+- [ ] **Step 5: Verify the live download path end to end**
+
+This is the step that proves the whole chain works: the committed pointer, the release it names, the
+hash the pointer promises, and a search over what arrives. With no `DTA_*` overrides set, it uses the
+real `raw.githubusercontent.com` pointer URL and the real release.
+
+Run:
+
+```bash
+.venv/bin/python - <<'PY'
+import hashlib, json, pathlib, sys, tempfile, time, types
+
+root = pathlib.Path.cwd()
+package = types.ModuleType("dta_node")
+package.__path__ = [str(root)]
+sys.modules["dta_node"] = package
+sys.path.insert(0, str(root))
+
+import dta_node.store as store
+
+cache = pathlib.Path(tempfile.mkdtemp()) / "cache"
+cache.mkdir()
+store.cache_dir = lambda: cache          # folder_paths is unavailable outside ComfyUI
+
+print("state before download:", store.status().state)
+store.ensure_download()
+
+deadline = time.monotonic() + 120
+while time.monotonic() < deadline and store.status().state == store.STATE_DOWNLOADING:
+    time.sleep(0.5)
+
+status = store.status()
+print("state:", status.state, "data_version:", status.data_version)
+assert status.state == store.STATE_READY, status.error
+
+pointer = json.loads(pathlib.Path("data/latest.json").read_text(encoding="utf-8"))
+digest = hashlib.sha256((cache / "tags.bin.gz").read_bytes()).hexdigest()
+print("pointer sha256  :", pointer["sha256"])
+print("downloaded sha256:", digest)
+assert digest == pointer["sha256"], "the downloaded artifact is not the one the pointer names"
+
+index = store.load_index()
+print("search('blue_h') ->", [hit.name for hit in index.search("blue_h", limit=3)])
+PY
+```
+
+Expected: `state before download: missing`, then `ready` with `data_version=2026.09.22`, identical
+hashes, and `search('blue_h')` returning real tags. This is the first time the production download
+path is exercised at all; M1 through M2b used `DTA_LOCAL_ARTIFACT`.
+
+- [ ] **Step 6: Record the numbers in this plan and commit**
+
+Fill in the table in Step 3 with the CI figures and add a short paragraph naming the date of the run
+and the runner image, then:
+
+```bash
+git add docs/plans/2026-09-23-m3-ci-and-docs.md
+git commit -m "Record the CI latency figures"
+git push origin main
+```
+
+---
+
+## M3 completion criteria
+
+- `.venv/bin/python -m pytest -q` passes (158 tests, plus the three new ones from Task 1 → 161).
+- `.github/workflows/update-data.yml` exists, parses, and its steps run in the order fetch → build →
+  validate → test → decide → publish → commit.
+- A manual dispatch of the workflow succeeds and publishes `data-2026.09.22` with both assets and
+  `latest=false`.
+- The repository's `data/latest.json` names that release and matches its artifact's `sha256`.
+- The live download path works with no `DTA_*` overrides: the pointer URL resolves, the artifact
+  verifies against the pointer's hash, and a search over it returns real tags.
+- The CI latency figures are recorded in this plan, including the distributed one-character gate
+  that carried item I4 is about.
+- `README.md` takes a reader from install through settings, data updates, profiles, custom tags,
+  building, tests and the browser checklist.
+- No file outside `custom_nodes/ComfyUI-Danbooru-Tag-Autocomplete` was modified.
+
+## After M3
+
+- **The browser checklist is still the one gate nothing here can close.** It needs a running
+  ComfyUI, and it now also covers the live download path from a real install.
+- The remaining M2b deferrals are listed in `docs/plans/2026-09-23-m2b-browser-ui.md` under
+  "Carried forward". The one with a real user consequence is the `deprecated → canonical` display
+  spec §8.3 asks for and M2a's search does not produce; the rest are cosmetic or narrow.
