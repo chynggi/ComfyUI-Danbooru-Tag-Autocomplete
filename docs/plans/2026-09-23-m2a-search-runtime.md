@@ -1828,21 +1828,29 @@ git commit -m "Add runtime artifact store"
 ### Task 4: The `Danbooru Tag Search` node
 
 **Files:**
+- Modify: `artifact.py` (rename `_hit_sort_key` to the public `hit_sort_key`)
 - Create: `nodes.py`
 - Create: `tests/test_nodes.py`
 - Modify: `pyproject.toml` (add `addopts = "--confcutdir=tests"`)
 
 **Interfaces:**
-- Consumes: `store.load_index`, `artifact.SearchHit`, `artifact.RANK_NAME_PREFIX`
-- Produces: `nodes.DanbooruTagSearch` with
-  - `INPUT_TYPES()` → `query` (STRING), `category` (combo of `any/general/artist/copyright/character/meta`), `min_post_count` (INT, 0), `limit` (INT, 1..200, default 32), `sort` (combo of `relevance/post_count/name`), `exclude_deprecated` (BOOLEAN, default True)
-  - `RETURN_TYPES = ("STRING",)`, `RETURN_NAMES = ("tags",)`, `FUNCTION = "search"`, `CATEGORY = "Danbooru"`
-  - `search(query, category, min_post_count, limit, sort, exclude_deprecated) -> tuple[str]` — a comma-and-space joined tag list
+- Consumes: `store.load_index`, `artifact.SearchHit`, `artifact.CATEGORY_NAMES`, `artifact.hit_sort_key`, `artifact.TagIndex.search`
+- Produces:
+  - `artifact.hit_sort_key(hit: SearchHit) -> tuple[int, int, int, str]` — the index's ordering, now public so the node can reuse it instead of duplicating the key
+  - `nodes.CATEGORY_OPTIONS: tuple[str, ...]`, `nodes.TERM_SEPARATORS: re.Pattern`
+  - `nodes.DanbooruTagSearch` with
+    - `INPUT_TYPES()` → `query` (STRING), `category` (combo of `any/general/artist/copyright/character/meta`), `limit` (INT, 1..200, default 32), `exclude_deprecated` (BOOLEAN, default True)
+    - `RETURN_TYPES = ("STRING",)`, `RETURN_NAMES = ("tags",)`, `FUNCTION = "search"`, `CATEGORY = "Danbooru"`
+    - `search(query, category, limit, exclude_deprecated) -> tuple[str]` — a comma-and-space joined tag list
 
-`query` accepts one term or several separated by `,`, `;` or newlines, so a whole prompt
-can be pasted in. Each term is searched independently and the results are merged, then
-re-sorted globally by the chosen order. Alias and deprecated matches always report the
-canonical tag name.
+**Scope note.** An earlier version of this task carried `min_post_count` and `sort` inputs. Both were removed after review, and the removal is the fix rather than a simplification for its own sake:
+
+- `min_post_count` was applied *after* the index had already capped each term's candidates by relevance, so `search("blue_h", min_post_count=1300, limit=1)` returned nothing even though a qualifying tag existed. Fixing it properly means adding a post-count filter to `TagIndex.search` in both Python and JavaScript, because the bound has to apply before selection — a shared-interface change for an input nobody asked for.
+- `sort` re-ordered a window the index had already selected by relevance, so `post_count` and `name` were not the global order they claimed to be. `search("a", limit=2, sort="post_count")` answered `aa, a` rather than the two highest-count matches.
+
+The node's job is "search the tag database and emit the canonical tags", and the index's own relevance order is the correct order for that. Both inputs are gone; `limit` now means "the best `limit` matches by relevance", which is exactly what the index guarantees.
+
+**Ordering and merging.** `query` accepts one term or several separated by `,`, `;` or newlines, so a whole prompt can be pasted in. Each term is searched independently and results merge **by canonical name, keeping the better hit** — a plain `setdefault` would let a rank-2 alias hit from an earlier term block a rank-1 name hit from a later one and make the output depend on term order. Alias and deprecated matches always report the canonical tag name.
 
 - [ ] **Step 1: Keep pytest out of the node package, then write the failing node tests**
 
@@ -1913,72 +1921,87 @@ def node(node_package, tmp_path, monkeypatch):
 
 
 def test_relevance_orders_by_rank_then_name_length(node):
-    assert node.search("blue_h", "any", 0, 32, "relevance", True)[0] == "blue_hair, blue_hairband"
-
-
-def test_post_count_sort_orders_by_count(node):
-    assert node.search("blue_h", "any", 0, 32, "post_count", True)[0] == "blue_hairband, blue_hair"
-
-
-def test_name_sort_orders_alphabetically(node):
-    assert node.search("blue_h", "any", 0, 32, "name", True)[0] == "blue_hair, blue_hairband"
-
-
-def test_min_post_count_filters_results(node):
-    assert node.search("blue_h", "any", 1300, 32, "relevance", True)[0] == "blue_hairband"
+    assert node.search("blue_h", "any", 32, True)[0] == "blue_hair, blue_hairband"
 
 
 def test_limit_caps_the_result(node):
-    assert node.search("blue_h", "any", 0, 1, "relevance", True)[0] == "blue_hair"
+    assert node.search("blue_h", "any", 1, True)[0] == "blue_hair"
 
 
 def test_category_filters_results(node):
-    assert node.search("hatsune_miku", "character", 0, 32, "relevance", True)[0] == "hatsune_miku"
-    assert node.search("hatsune_miku", "general", 0, 32, "relevance", True)[0] == ""
+    assert node.search("hatsune_miku", "character", 32, True)[0] == "hatsune_miku"
+    assert node.search("hatsune_miku", "general", 32, True)[0] == ""
 
 
 def test_alias_query_returns_the_canonical_tag(node):
-    assert node.search("blu_h", "any", 0, 32, "relevance", True)[0] == "blue_hair"
+    assert node.search("blu_h", "any", 32, True)[0] == "blue_hair"
 
 
 def test_deprecated_matches_are_excluded_unless_requested(node):
-    assert node.search("old_tag", "any", 0, 32, "relevance", True)[0] == ""
-    assert node.search("old_tag", "any", 0, 32, "relevance", False)[0] == "old_tag"
+    assert node.search("old_tag", "any", 32, True)[0] == ""
+    assert node.search("old_tag", "any", 32, False)[0] == "old_tag"
 
 
 def test_multiple_terms_are_merged_and_deduplicated(node):
-    assert node.search("1girl, blue_h", "any", 0, 32, "relevance", True)[0] == "1girl, blue_hair, blue_hairband"
+    assert node.search("1girl, blue_h", "any", 32, True)[0] == "1girl, blue_hair, blue_hairband"
 
 
 def test_newline_separated_terms_are_split(node):
-    assert node.search("1girl\nblue_h", "any", 0, 32, "relevance", True)[0] == "1girl, blue_hair, blue_hairband"
+    assert node.search("1girl\nblue_h", "any", 32, True)[0] == "1girl, blue_hair, blue_hairband"
+
+
+def test_term_order_does_not_change_the_result(node):
+    forwards = node.search("blu_hair\nblue_h", "any", 32, True)[0]
+    backwards = node.search("blue_h\nblu_hair", "any", 32, True)[0]
+    assert forwards == backwards == "blue_hair, blue_hairband"
 
 
 def test_empty_query_returns_an_empty_string(node):
-    assert node.search("", "any", 0, 32, "relevance", True)[0] == ""
-    assert node.search("   ", "any", 0, 32, "relevance", True)[0] == ""
+    assert node.search("", "any", 32, True)[0] == ""
+    assert node.search("   ", "any", 32, True)[0] == ""
 
 
 def test_a_missing_database_returns_an_empty_string(node, tmp_path, monkeypatch):
     monkeypatch.setenv("DTA_LOCAL_ARTIFACT", str(tmp_path / "nowhere" / "tags.bin.gz"))
-    assert node.search("blue_h", "any", 0, 32, "relevance", True)[0] == ""
+    assert node.search("blue_h", "any", 32, True)[0] == ""
+
+
+def test_a_truncated_database_returns_an_empty_string(node, tmp_path, monkeypatch):
+    source = build_source(tmp_path / "broken")
+    source.write_bytes(source.read_bytes()[:-8])
+    monkeypatch.setenv("DTA_LOCAL_ARTIFACT", str(source))
+    assert node.search("blue_h", "any", 32, True)[0] == ""
 
 
 def test_input_types_expose_the_documented_options(node):
     required = node.INPUT_TYPES()["required"]
-    assert list(required) == ["query", "category", "min_post_count", "limit", "sort", "exclude_deprecated"]
+    assert list(required) == ["query", "category", "limit", "exclude_deprecated"]
     assert list(required["category"][0]) == ["any", "general", "artist", "copyright", "character", "meta"]
-    assert list(required["sort"][0]) == ["relevance", "post_count", "name"]
     assert node.RETURN_TYPES == ("STRING",)
+    assert node.RETURN_NAMES == ("tags",)
     assert node.CATEGORY == "Danbooru"
 ```
+
+The `blue_hairband` count (1500) is deliberately higher than `blue_hair`'s (1200) while its
+name is longer, so the relevance order (name length first) and a plain count order disagree.
+That is what makes the first test meaningful.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_nodes.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'dta_node.nodes'`
 
-- [ ] **Step 3: Write `nodes.py`**
+- [ ] **Step 3: Expose the sort key, then write `nodes.py`**
+
+In `artifact.py`, rename `_hit_sort_key` to `hit_sort_key` and update its three call sites
+inside `TagIndex` (`_alias_hits`, `_search_source` twice). Keep the body identical:
+
+```python
+def hit_sort_key(hit: SearchHit) -> tuple[int, int, int, str]:
+    return (hit.rank, hit.name_length if hit.rank == RANK_NAME_PREFIX else 0, -hit.post_count, hit.name)
+```
+
+Then write `nodes.py`:
 
 ```python
 """The `Danbooru Tag Search` node."""
@@ -1989,13 +2012,11 @@ import logging
 import re
 
 from . import store
-from .artifact import RANK_NAME_PREFIX
+from .artifact import CATEGORY_NAMES, SearchHit, hit_sort_key
 
 log = logging.getLogger(__name__)
 
-CATEGORY_OPTIONS = ("any", "general", "artist", "copyright", "character", "meta")
-CATEGORY_VALUES = {"general": 0, "artist": 1, "copyright": 3, "character": 4, "meta": 5}
-SORT_OPTIONS = ("relevance", "post_count", "name")
+CATEGORY_OPTIONS = ("any",) + tuple(CATEGORY_NAMES)
 TERM_SEPARATORS = re.compile(r"[,\n;]")
 
 
@@ -2006,9 +2027,7 @@ class DanbooruTagSearch:
             "required": {
                 "query": ("STRING", {"default": "", "multiline": False}),
                 "category": (list(CATEGORY_OPTIONS), {"default": "any"}),
-                "min_post_count": ("INT", {"default": 0, "min": 0, "max": 100_000_000}),
                 "limit": ("INT", {"default": 32, "min": 1, "max": 200}),
-                "sort": (list(SORT_OPTIONS), {"default": "relevance"}),
                 "exclude_deprecated": ("BOOLEAN", {"default": True}),
             }
         }
@@ -2018,48 +2037,45 @@ class DanbooruTagSearch:
     FUNCTION = "search"
     CATEGORY = "Danbooru"
 
-    def search(self, query, category, min_post_count, limit, sort, exclude_deprecated):
+    def search(self, query, category, limit, exclude_deprecated):
         terms = [term.strip() for term in TERM_SEPARATORS.split(query) if term.strip()]
         if not terms:
             return ("",)
 
         try:
             index = store.load_index()
-        except (FileNotFoundError, OSError, ValueError) as exc:
+        except (FileNotFoundError, OSError, EOFError, ValueError) as exc:
             log.warning("danbooru-tag-search: tag database is unavailable: %s", exc)
             return ("",)
 
-        categories = None if category == "any" else frozenset({CATEGORY_VALUES[category]})
-        matched: dict[str, object] = {}
+        categories = None if category == "any" else frozenset({CATEGORY_NAMES[category]})
+        matched: dict[str, SearchHit] = {}
         for term in terms:
             for hit in index.search(term, limit=limit, categories=categories, exclude_deprecated=exclude_deprecated):
-                if hit.post_count < min_post_count:
-                    continue
-                matched.setdefault(hit.name, hit)
+                current = matched.get(hit.name)
+                if current is None or hit_sort_key(hit) < hit_sort_key(current):
+                    matched[hit.name] = hit
 
-        hits = list(matched.values())
-        if sort == "post_count":
-            hits.sort(key=lambda hit: (-hit.post_count, hit.name))
-        elif sort == "name":
-            hits.sort(key=lambda hit: hit.name)
-        else:
-            hits.sort(key=lambda hit: (hit.rank, hit.name_length if hit.rank == RANK_NAME_PREFIX else 0, -hit.post_count, hit.name))
-
-        return (", ".join(hit.name for hit in hits[:limit]),)
+        hits = sorted(matched.values(), key=hit_sort_key)[:limit]
+        return (", ".join(hit.name for hit in hits),)
 ```
+
+`EOFError` is in the caught set because `store._read_artifact_bytes` runs
+`gzip.decompress`, which raises `EOFError` — not `OSError` — on a truncated stream. Without
+it a half-written cache crashes the workflow instead of degrading to an empty string.
 
 - [ ] **Step 4: Run the node tests to verify they pass**
 
-Run: `.venv/bin/python -m pytest tests/test_nodes.py -v`
-Expected: PASS (13 passed)
+Run: `.venv/bin/python -m pytest tests/test_nodes.py tests/test_search.py tests/test_custom.py -v`
+Expected: PASS (12 node + 22 search + 24 custom)
 
-- [ ] **Step 5: Run the full suite and commit**
+- [ ] **Step 5: Run the whole suite and commit**
 
 Run: `.venv/bin/python -m pytest -q && node --test tests/test_search_js.mjs`
 Expected: PASS (both)
 
 ```bash
-git add nodes.py tests/test_nodes.py pyproject.toml
+git add artifact.py nodes.py tests/test_nodes.py pyproject.toml
 git commit -m "Add Danbooru Tag Search node"
 ```
 
