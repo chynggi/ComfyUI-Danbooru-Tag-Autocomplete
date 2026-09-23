@@ -1524,7 +1524,7 @@ approach for the frontend.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -1532,7 +1532,12 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const WEB = join(REPO_ROOT, "web");
 
 function webModules() {
-  return readdirSync(WEB).filter((name) => name.endsWith(".js")).sort();
+  // Model how ComfyUI collects extensions: server.py globs `**/*.js` under the web directory,
+  // so a module in a subdirectory is loaded too and has to be checked here.
+  return readdirSync(WEB, { recursive: true })
+    .filter((name) => name.endsWith(".js"))
+    .map((name) => name.split(sep).join("/"))
+    .sort();
 }
 
 test("every browser module parses", () => {
@@ -1559,7 +1564,9 @@ test("the only outside imports are ComfyUI's own frontend modules", () => {
   // `../../scripts/*.js` is not on disk inside this repo: ComfyUI serves the frontend from its
   // own package at /scripts/, and this module is loaded from /extensions/danbooruTagAutocomplete/,
   // so the path is correct at runtime and unresolvable from here. Pin the allowed set to the two
-  // modules the extension actually needs, so a typo or an accidental new dependency is caught.
+  // modules the extension actually needs, so a typo is caught. The pattern sees a double-quoted
+  // relative specifier, which is the only import form this repo uses; a bare package specifier,
+  // a side-effect import or a dynamic import would each need their own check.
   const allowed = new Set(["../../scripts/app.js", "../../scripts/widgets.js"]);
   for (const name of webModules()) {
     const source = readFileSync(join(WEB, name), "utf8");
@@ -1616,10 +1623,11 @@ The browser behaviour is verified by hand, as the design specifies. Run ComfyUI,
 - Typing a plain sentence with no matches leaves the field exactly as before: no interception,
   no swallowed keys, no flicker.
 - With Nodes 2.0 (`Modern Node Design`) enabled, the same checks pass.
-- With `DanbooruTagAutocomplete.Enabled` off, no list ever appears.
+- With `Enable tag autocomplete` turned off in the settings, no list ever appears.
 - With another autocomplete extension active, this one stays off and logs why; turning on
-  `ForceEnableWithOtherAutocomplete` makes it appear.
-- Deleting `user/danbooru-tag-autocomplete/` and reloading downloads it again and then works.
+  `Enable alongside another autocomplete` makes it appear.
+- Deleting `user/danbooru-tag-autocomplete/` and reloading the page starts a fresh download, and
+  suggestions come back once it has finished.
 - With the download blocked (offline), a dismissible banner explains why and typing still works.
 - A `user/danbooru-tag-autocomplete/custom_tags.csv` with `my_tag,general,0,` and
   `my_old,general,0,my_tag` makes `my_old` suggest `my_tag`.
@@ -1650,11 +1658,103 @@ git commit -m "Add browser asset guard and checklist"
 
 ---
 
+### Task 7: Recover when the cached artifact is deleted
+
+**Files:**
+- Modify: `store.py`
+- Modify: `tests/test_store.py`
+
+**Interfaces:**
+- Consumes: nothing new.
+- Produces: `store.status()` keeps its signature. Its result changes in exactly one situation: when
+  the artifact files are gone but the module still holds `STATE_READY`, it now reports
+  `STATE_MISSING` instead of `STATE_READY`.
+
+**The defect.** Task 6's reviewer found it while reading the checklist it was reviewing, and it is
+a real one. `status()` reports `READY` when the artifact and metadata files exist, and otherwise
+falls back to the module-level `_state`. After a completed download that `_state` is `READY`, so
+deleting the cache directory — which the checklist does, and which a user forcing a re-download
+would do — leaves `status()` still answering `READY`. The status route only starts a download when
+the state is `MISSING` (`routes.py`), so nothing restarts it, `/db` answers 404, and the frontend
+goes quiet with no way back other than restarting ComfyUI. `ensure_download()` already handles
+missing files correctly; it is simply never called.
+
+**The fix.** Report `MISSING` when the files are gone and the state claims otherwise, so the
+existing route logic recovers on its own. Deliberately the smallest change that makes the existing
+recovery path reachable, rather than a new mechanism.
+
+**Why this task is in M2b.** It is not browser UX, and the reviewer flagged the underlying
+behaviour as pre-existing. It is here because M2b's own checklist is the only thing that exercises
+it, because Task 5's failure routing sends a `/db` 404 to the quiet path so the user would see
+nothing at all, and because the fix is three lines with a test. Deferring it would mean shipping a
+checklist line whose behaviour is broken.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `tests/test_store.py`:
+
+```python
+def test_status_reports_missing_when_a_ready_cache_is_deleted(store):
+    build_artifact(store.cache_dir())
+    # A completed download leaves the module holding STATE_READY. Deleting the cache afterwards
+    # must not leave it claiming to be ready, because the status route only starts a new download
+    # when the state is MISSING.
+    store._state = store.STATE_READY
+    assert store.status().state == store.STATE_READY
+
+    (store.cache_dir() / "tags.bin.gz").unlink()
+
+    assert store.status().state == store.STATE_MISSING
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `.venv/bin/python -m pytest tests/test_store.py -q -k ready_cache_is_deleted`
+Expected: FAIL, `assert 'ready' == 'missing'`
+
+- [ ] **Step 3: Fix `store.py`**
+
+Replace `status` with:
+
+```python
+def status() -> Status:
+    """Report the cache state. Never raises."""
+    ready = artifact_path().exists() and metadata_path().exists()
+    with _lock:
+        if ready and _state != STATE_DOWNLOADING:
+            return Status(STATE_READY, _data_version(), None)
+        if not ready and _state == STATE_READY:
+            # The cache was deleted after a completed load. Reporting READY would leave the
+            # status route with nothing to do while /db answers 404, so the frontend would go
+            # quiet with no way back but a restart. Report MISSING so a download starts.
+            return Status(STATE_MISSING, _data_version(), None)
+        return Status(_state, _data_version(), _error)
+```
+
+The existence check moves inside the lock so the whole decision is atomic; `_data_version()` was
+already called under the lock. Nothing else changes: files present and not downloading is still
+`READY` whether or not a download is in flight, and a failed download is still `ERROR` and is still
+not retried automatically.
+
+- [ ] **Step 4: Run the suite**
+
+Run: `.venv/bin/python -m pytest -q`
+Expected: PASS (157 tests)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add store.py tests/test_store.py
+git commit -m "Recover when the cached artifact is deleted"
+```
+
+---
+
 ## M2b completion criteria
 
 - `node --test tests/test_insert_js.mjs tests/test_keys_js.mjs tests/test_dropdown_js.mjs tests/test_web_assets.mjs tests/test_search_js.mjs`
   passes.
-- `.venv/bin/python -m pytest -q` still passes (M2a's 156 tests).
+- `.venv/bin/python -m pytest -q` passes, including the one test Task 7 adds (157 tests).
 - Every `web/*.js` parses, every relative import resolves, and only `dtautocomplete.js`
   registers an extension.
 - The manual checklist in `README.md` is written and ready to walk.
