@@ -1,122 +1,123 @@
-# Next steps
+# 다음 단계
 
-What is left after M1 (data pipeline), M2a (search core and runtime), M2b (browser UI) and M3 (CI and
-docs), in the order I would take it. Each item names the evidence it came from and how to tell it is
-done. The milestone plans under `docs/plans/` hold the full context; this file is the entry point.
+[English](next-steps.en.md) | **한국어**
 
-Current state: all four milestones are merged, `main` is green (161 pytest tests, 52 Node tests, and
-the data workflow runs both on CI), the release `data-2026.09.23` is published, and the download path
-has been verified end to end.
+M1(데이터 파이프라인), M2a(검색 코어와 런타임), M2b(브라우저 UI), M3(CI와 문서) 이후에 남은 작업을
+제가 진행할 순서대로 정리했습니다. 각 항목에는 근거와 완료 판단 기준을 적어 두었습니다. 전체 맥락은
+`docs/plans/` 아래의 마일스톤 계획에 있으며, 이 파일은 그 진입점입니다.
 
-## 1. Walk the browser checklist
+현재 상태: 네 개의 마일스톤이 모두 병합되었고, `main`은 통과 상태입니다(pytest 테스트 161개, Node 테스트
+52개, 데이터 워크플로가 CI에서 둘 다 실행). `data-2026.09.23` 릴리스가 게시되었으며, 다운로드 경로는
+처음부터 끝까지 검증되었습니다.
 
-**Why first.** It is the only verification the browser layers and the live install path ever get, and
-it has never been run. Everything below is secondary to a headline feature nobody has confirmed works
-in a browser.
+## 1. 브라우저 체크리스트 확인하기
 
-**What.** `README.md`'s "Browser checklist" section, in order, against a running ComfyUI. It covers
-the widget hook in both renderers, the caret geometry, insertion and undo, the dropdown's mouse
-handling, all eight settings, coexistence with pysssss's autocompleter, the error banner, custom tags,
-and cache recovery.
+**가장 먼저인 이유.** 브라우저 계층과 실제 설치 경로가 받는 유일한 검증인데, 아직 한 번도 실행되지
+않았습니다. 핵심 기능이 브라우저에서 동작하는지 아무도 확인하지 않은 상태에서는 아래 항목은 모두
+부차적입니다.
 
-**Done when.** Every line passes, or each failure becomes its own task. Two lines may need rewording
-as you go: `Modern Node Design` has never been confirmed against the real UI, and the Nodes 2.0 items
-depend on frontend behaviour nothing in this repository could test.
+**내용.** `README.md`의 "브라우저 체크리스트" 섹션을 실행 중인 ComfyUI에서 순서대로 확인합니다. 두
+렌더러의 위젯 훅, 캐럿 위치 계산, 삽입과 실행 취소, 드롭다운의 마우스 처리, 여덟 가지 설정 전부,
+pysssss 자동완성과의 공존, 오류 배너, 사용자 정의 태그, 캐시 복구를 다룹니다.
 
-**Effort.** An hour with ComfyUI running.
+**완료 기준.** 모든 항목이 통과하거나, 실패한 항목이 각각 별도 작업이 됩니다. 진행하면서 두 항목은
+문구를 고쳐야 할 수도 있습니다. `Modern Node Design`은 실제 UI에서 확인된 적이 없고, Nodes 2.0 항목은
+이 저장소에서 테스트할 수 없는 프런트엔드 동작에 의존합니다.
 
-## 2. Check for new data when the server starts
+**작업량.** ComfyUI를 실행한 상태에서 한 시간.
 
-**Why.** The project's premise is a tag database that updates itself. Today the scheduled workflow
-does its half — it publishes a new `data-<version>` release daily and commits the pointer — but a
-running install never looks again. `ensure_download()` returns immediately when the cache is present,
-and the status route only starts a download when the state is `missing`, so new data reaches a fresh
-install or a user who deletes ComfyUI's user directory `danbooru-tag-autocomplete/` and reloads. That
-manual step is what the checklist already tests, and `README.md` states it plainly.
+## 2. 서버 시작 시 새 데이터 확인하기
 
-**Shape.** On the first `/status` of a process, if the cache exists, fetch the pointer, compare its
-`data_version` with the cached one, and start the existing background download when it is newer. Fail
-silently when offline, which is what the design's §10.4 asks for. The download already replaces the
-artifact atomically and invalidates the in-process caches by mtime and size, so the change is small;
-the part to be careful with is the state machine's rule that a failed download is not retried
-automatically, which must stay true.
+**이유.** 이 프로젝트의 전제는 스스로 갱신되는 태그 데이터베이스입니다. 현재 예약된 워크플로는 자기 몫을
+하고 있습니다. 매일 새 `data-<version>` 릴리스를 게시하고 포인터를 커밋합니다. 하지만 실행 중인 설치본은
+다시 확인하지 않습니다. `ensure_download()`는 캐시가 있으면 즉시 반환하고, 상태 라우트는 상태가
+`missing`일 때만 다운로드를 시작합니다. 그래서 새 데이터는 새 설치본이나, ComfyUI 사용자 디렉터리의
+`danbooru-tag-autocomplete/`를 삭제하고 새로고침한 사용자에게만 전달됩니다. 이 수동 단계는 체크리스트가
+이미 테스트하는 내용이며, `README.md`에도 명확히 적혀 있습니다.
 
-**Watch out.** An already-open browser tab built its index when it loaded, so a mid-session update
-needs a page reload to reach the dropdown. The design is also ambiguous here: §10.2 and §10.3 describe
-downloading only when the cache is absent, while §10.4's "only the update check fails" implies a check
-exists. This item resolves that in favour of updating.
+**구현 방향.** 프로세스의 첫 `/status` 요청에서 캐시가 있으면 포인터를 가져와 `data_version`을 캐시된
+값과 비교하고, 더 새로우면 기존 백그라운드 다운로드를 시작합니다. 오프라인일 때는 설계 §10.4가 요구하는
+대로 조용히 실패합니다. 다운로드는 이미 아티팩트를 원자적으로 교체하고 mtime과 크기로 프로세스 내 캐시를
+무효화하므로 변경 폭은 작습니다. 주의할 부분은 "실패한 다운로드는 자동으로 재시도하지 않는다"는 상태
+머신 규칙으로, 이 규칙은 계속 유지되어야 합니다.
 
-**Done when.** Tests prove that a cached store with a newer pointer downloads, that an equal pointer
-does nothing, that an unreachable pointer leaves the cache ready and usable, and that the checklist's
-cache-recovery line still holds.
+**주의 사항.** 이미 열려 있는 브라우저 탭은 로드 시점에 인덱스를 만들었으므로, 세션 도중의 업데이트가
+드롭다운에 반영되려면 페이지를 새로고침해야 합니다. 설계도 이 부분이 모호합니다. §10.2와 §10.3은
+캐시가 없을 때만 다운로드한다고 설명하지만, §10.4의 "업데이트 확인만 실패한다"는 표현은 확인 절차가
+존재함을 암시합니다. 이 항목은 이를 업데이트하는 쪽으로 정리합니다.
 
-**Effort.** One small task, `store.py` plus tests.
+**완료 기준.** 테스트로 다음을 증명합니다. 캐시된 저장소에 더 새로운 포인터가 오면 다운로드한다, 같은
+포인터면 아무것도 하지 않는다, 포인터에 접근할 수 없으면 캐시가 준비된 상태로 사용 가능하게 남는다,
+그리고 체크리스트의 캐시 복구 항목이 여전히 성립한다.
 
-## 3. Honour the design's two licence-driven build requirements
+**작업량.** 작은 작업 하나, `store.py`와 테스트.
 
-**Why.** §14 treats `HDiffusion/historical-danbooru-tag-counts` as a licensing risk — no LICENSE file,
-only an `apache-2.0` card tag — and asks for two things the build does not do. The source repositories
-have no environment override, so replacing one is a code edit; and there is no fallback, so if that
-dataset is withdrawn the nightly build fails and data updates stop until someone edits
-`SOURCE_ORDER` in `build/fetch_upstream.py`. The README's licence section states both limitations.
+## 3. 라이선스에서 비롯된 설계의 빌드 요구 사항 두 가지 반영하기
 
-**Shape.** Make the sources' repository and revision targets overridable, and let an unavailable
-source be skipped with a warning that lands in the release's `metadata.json`, so each artifact records
-what it was actually built from.
+**이유.** §14는 `HDiffusion/historical-danbooru-tag-counts`를 라이선스 위험으로 다룹니다(LICENSE 파일이
+없고 카드에 `apache-2.0` 태그만 있음). 그리고 현재 빌드가 하지 않는 두 가지를 요구합니다. 출처
+저장소를 환경 변수로 바꿀 수 없어서 출처를 교체하려면 코드를 수정해야 하고, 대체 경로가 없어서 그
+데이터셋이 철회되면 누군가 `build/fetch_upstream.py`의 `SOURCE_ORDER`를 수정할 때까지 야간 빌드가
+실패하고 데이터 업데이트가 멈춥니다. README의 라이선스 섹션에 두 제약이 모두 적혀 있습니다.
 
-**Done when.** A test builds with one source unavailable and asserts that the artifact is still
-produced, that the warning is reported, and that `metadata.json` lists only the sources that
-contributed.
+**구현 방향.** 출처의 저장소와 리비전 대상을 재정의할 수 있게 하고, 사용할 수 없는 출처는 경고와 함께
+건너뛰되 그 경고가 릴리스의 `metadata.json`에 남도록 하여, 각 아티팩트가 실제로 무엇으로 빌드되었는지
+기록되게 합니다.
 
-**Effort.** One task, `build/` plus tests. Decide first whether a smaller artifact is acceptable,
-because that is the trade §14 accepts.
+**완료 기준.** 출처 하나를 사용할 수 없는 상태로 빌드하는 테스트가, 아티팩트가 여전히 생성되고 경고가
+보고되며 `metadata.json`에 실제로 기여한 출처만 나열됨을 확인합니다.
 
-## 4. Show `deprecated → canonical` again
+**작업량.** 작업 하나, `build/`와 테스트. §14가 감수하는 트레이드오프이므로, 더 작은 아티팩트를 받아들일
+수 있는지 먼저 결정하세요.
 
-**Why.** §8.3 asks the dropdown to show that relationship when the typed name is a deprecated alias
-target, and `web/dropdown.js` has a `deprecated` badge for it. Nothing can reach that code:
-`search()` defaults `excludeDeprecated: true`, and the alias search skips a deprecated target
-outright, so no hit ever carries `deprecated: true`.
+## 4. `deprecated → canonical` 표시 복원하기
 
-**Shape.** This is a search-semantics question, not a rendering one: decide whether a deprecated alias
-target is suggested with a marker or skipped as it is now, then make the search and the renderer
-agree. Both the Python and the browser implementations must change together, and
-`tests/fixtures/queries.json` with `tests/test_search_js.mjs` exist to keep them in parity.
+**이유.** §8.3은 입력한 이름이 사용 중단된 별칭 대상일 때 드롭다운이 그 관계를 보여 주도록 요구하며,
+`web/dropdown.js`에는 이를 위한 `deprecated` 배지가 있습니다. 하지만 이 코드에 도달할 방법이 없습니다.
+`search()`의 기본값이 `excludeDeprecated: true`이고, 별칭 검색은 사용 중단된 대상을 아예 건너뛰므로
+`deprecated: true`를 가진 결과가 나오지 않습니다.
 
-**Effort.** One task touching `artifact.py`, `web/search.js` and the fixtures.
+**구현 방향.** 이는 렌더링 문제가 아니라 검색 의미론의 문제입니다. 사용 중단된 별칭 대상을 표시와 함께
+추천할지, 지금처럼 건너뛸지 결정한 다음 검색과 렌더러가 일치하도록 만듭니다. Python과 브라우저 구현을
+함께 바꿔야 하며, 둘의 일관성을 유지하기 위해 `tests/fixtures/queries.json`과
+`tests/test_search_js.mjs`가 있습니다.
 
-## 5. Cut a code release, `v0.1.0`
+**작업량.** `artifact.py`, `web/search.js`, 픽스처를 건드리는 작업 하나.
 
-**Why.** Data releases use the `data-*` prefix and are created with `--latest=false`, but with no code
-release GitHub reports the newest published release as the repository's latest, so
-`data-2026.09.23` currently holds that badge. The design separates the two kinds of release: data
-releases are automatic, code releases are cut by hand.
+## 5. 코드 릴리스 `v0.1.0` 만들기
 
-**Shape.** Tag `v0.1.0` and write the notes from the four milestone plans. No code needs to change.
+**이유.** 데이터 릴리스는 `data-*` 접두사를 쓰고 `--latest=false`로 생성되지만, 코드 릴리스가 없으면
+GitHub는 가장 최근에 게시된 릴리스를 저장소의 최신 릴리스로 표시하므로 현재 `data-2026.09.23`이 그
+배지를 달고 있습니다. 설계는 두 종류의 릴리스를 구분합니다. 데이터 릴리스는 자동이고, 코드 릴리스는
+수동으로 만듭니다.
 
-**Effort.** Minutes.
+**구현 방향.** `v0.1.0` 태그를 만들고 네 개의 마일스톤 계획을 바탕으로 릴리스 노트를 작성합니다. 코드
+변경은 필요 없습니다.
 
-## Smaller items
+**작업량.** 몇 분.
 
-None of these is worth a milestone. Each is recorded with its reasoning in the plan that found it.
+## 작은 항목
 
-| Item | Source | Note |
+모두 마일스톤으로 삼을 만한 규모는 아닙니다. 각 항목의 근거는 그것을 발견한 계획 문서에 기록되어
+있습니다.
+
+| 항목 | 출처 | 비고 |
 |---|---|---|
-| `/db` sets no `ETag` or `Last-Modified` | design §10.3 | The design asks for both; the route sets `Cache-Control: no-cache` and nothing else, so every page load refetches 2.3 MB. |
-| `/db` probes its file unguarded | M2b plan | A cache readable as a directory but not as a file can answer 500. M2b's Task 7 fixed only the directory case. |
-| `formatPostCount(999_999)` renders `1000K` | M2b plan | Display only; the design pins 1000, 82000 and 1200000. |
-| The caret mirror does not copy `direction` | M2b plan | An RTL prompt would report a wrong `left`. Danbooru tags are ASCII. |
-| `web/keys.js` test gaps | M2b plan | No `count === 1`, no `page` larger than the list, no negative index with an unknown action. The code is correct on all three. |
-| Each textarea keeps a dropdown and a mirror on `body` | M2b plan | Deleting a node leaves an empty hidden element. Both clear their contents when hidden, so no prompt text is retained. |
-| Four exports have no importer | M2b plan | `SETTING_IDS`, `mirrorFor`, `CATEGORY_LABELS`, `CATEGORY_COLORS`. Kept as interface; a task's verification step asserts two of them. |
-| The design's profile list is inaccurate | M3 plan | §5 names illustrious/noobai/pony/wai; only `danbooru` ships, because §13.1 gives no filter values for the others. |
-| A failed `git push` in the workflow | M3 plan | The next run recovers, because change detection reads the repository's own pointer. Only the bot-only case has been observed. |
+| `/db`가 `ETag`나 `Last-Modified`를 설정하지 않음 | 설계 §10.3 | 설계는 둘 다 요구하지만 라우트는 `Cache-Control: no-cache`만 설정하므로, 페이지를 로드할 때마다 2.3 MB를 다시 받습니다. |
+| `/db`가 파일을 보호 없이 검사함 | M2b 계획 | 디렉터리로는 읽히지만 파일로는 읽히지 않는 캐시는 500을 반환할 수 있습니다. M2b의 Task 7은 디렉터리 경우만 고쳤습니다. |
+| `formatPostCount(999_999)`가 `1000K`로 표시됨 | M2b 계획 | 표시에만 영향이 있으며, 설계는 1000, 82000, 1200000을 고정해 둡니다. |
+| 캐럿 미러가 `direction`을 복사하지 않음 | M2b 계획 | RTL 프롬프트에서는 `left`가 잘못 계산됩니다. Danbooru 태그는 ASCII입니다. |
+| `web/keys.js`의 테스트 공백 | M2b 계획 | `count === 1`, 목록보다 큰 `page`, 알 수 없는 동작과 음수 인덱스 조합이 테스트되지 않았습니다. 세 경우 모두 코드는 올바릅니다. |
+| 각 textarea가 `body`에 드롭다운과 미러를 하나씩 유지함 | M2b 계획 | 노드를 삭제하면 비어 있는 숨김 요소가 남습니다. 둘 다 숨겨질 때 내용을 비우므로 프롬프트 텍스트는 남지 않습니다. |
+| 가져다 쓰는 곳이 없는 export 네 개 | M2b 계획 | `SETTING_IDS`, `mirrorFor`, `CATEGORY_LABELS`, `CATEGORY_COLORS`. 인터페이스로 유지하며, 한 작업의 검증 단계가 그중 두 개를 확인합니다. |
+| 설계의 프로필 목록이 부정확함 | M3 계획 | §5는 illustrious/noobai/pony/wai를 언급하지만, §13.1에 나머지의 필터 값이 없어서 `danbooru`만 배포됩니다. |
+| 워크플로의 `git push` 실패 | M3 계획 | 변경 감지가 저장소 자체의 포인터를 읽으므로 다음 실행에서 복구됩니다. 봇만 관련된 경우만 관찰되었습니다. |
 
-## How to tell the whole thing works
+## 전체가 동작하는지 확인하는 방법
 
-1. `.venv/bin/python -m pytest -q` and `node --test tests/*.mjs` are green.
-2. `gh workflow run update-data.yml` succeeds, and its decide step reports either `publish=true` for
-   new data or a missing release, or `publish=false` with the release present.
-3. With no `DTA_*` overrides set, a fresh cache downloads the artifact the pointer names, its `sha256`
-   matches, and a search returns real tags.
-4. The browser checklist passes.
+1. `.venv/bin/python -m pytest -q`와 `node --test tests/*.mjs`가 통과한다.
+2. `gh workflow run update-data.yml`이 성공하고, decide 단계가 새 데이터나 누락된 릴리스에 대해
+   `publish=true`를, 또는 릴리스가 있을 때 `publish=false`를 보고한다.
+3. `DTA_*` 오버라이드를 설정하지 않은 상태에서, 새 캐시가 포인터가 가리키는 아티팩트를 내려받고, 그
+   `sha256`이 일치하며, 검색이 실제 태그를 반환한다.
+4. 브라우저 체크리스트가 통과한다.
