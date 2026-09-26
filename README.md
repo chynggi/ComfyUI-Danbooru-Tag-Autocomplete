@@ -1,5 +1,7 @@
 # ComfyUI Danbooru Tag Autocomplete
 
+[English](README.en.md) | **한국어**
+
 ComfyUI용 Danbooru 태그 자동완성 확장입니다. 태그 데이터는 매일 스스로 갱신되는 Hugging Face 태그
 메타데이터를 기반으로 합니다. 프롬프트 입력란에 타이핑하면 일치하는 태그가 캐럿 아래에 나타나고,
 `Tab`을 누르면 태그가 삽입됩니다.
