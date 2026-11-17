@@ -1,7 +1,7 @@
 {
-  "data_version": "2026.11.15",
+  "data_version": "2026.11.16",
   "profile": "danbooru",
-  "sha256": "27acbb9d281913e8f7f51fd09f83869415fc36ebebb09cb5e9ffeafdc71f4413",
-  "size": 2335519,
-  "url": "https://github.com/chynggi/ComfyUI-Danbooru-Tag-Autocomplete/releases/download/data-2026.11.15/tags.bin.gz"
+  "sha256": "e2d5b62b3cf9ef3f2474798c4eb3bc0e25c08fedcb08b33b58d06dc0f5d9a3f0",
+  "size": 2335854,
+  "url": "https://github.com/chynggi/ComfyUI-Danbooru-Tag-Autocomplete/releases/download/data-2026.11.16/tags.bin.gz"
 }
